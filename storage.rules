@@ -1,0 +1,15 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function admin(){return request.auth != null && request.auth.token.admin == true;}
+    match /site/{path=**} {
+      allow read: if true;
+      allow write: if admin() && request.resource.size < 10 * 1024 * 1024 && request.resource.contentType.matches('image/(jpeg|png|webp|gif|avif)');
+    }
+    match /audio/{path=**} {
+      allow read: if true;
+      allow write: if admin() && request.resource.size < 20 * 1024 * 1024 && request.resource.contentType.matches('audio/.*');
+    }
+    match /{path=**} {allow read, write: if false;}
+  }
+}

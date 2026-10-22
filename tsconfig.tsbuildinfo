@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/data.ts","./src/firebase.ts","./src/main.tsx","./src/media.tsx","./src/store.ts","./src/vite-env.d.ts","./src/components/shared.tsx","./src/i18n/index.ts"],"version":"5.9.3"}

@@ -1,0 +1,8 @@
+{
+  "name": "el-bem-firebase-functions",
+  "private": true,
+  "engines": {"node":"22"},
+  "main": "index.js",
+  "scripts": {"check": "node --check index.js"},
+  "dependencies": {"firebase-admin":"^13.4.0", "firebase-functions":"^6.3.2"}
+}

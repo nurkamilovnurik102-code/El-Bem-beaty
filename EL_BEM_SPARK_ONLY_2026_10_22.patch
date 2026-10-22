@@ -1,0 +1,732 @@
+--- a/.env.example
++++ b/.env.example
+@@ -6,7 +6,7 @@
+ VITE_FIREBASE_PROJECT_ID=
+ VITE_FIREBASE_STORAGE_BUCKET=
+ VITE_FIREBASE_APP_ID=
+-VITE_FIREBASE_FUNCTIONS_REGION=europe-west1
++# Spark-only: no Cloud Functions deployment needed
+ # Verified business contact only; digits without +
+ VITE_SALON_WHATSAPP=
+ # Optional: enable only after registering your domain/reCAPTCHA v3 site key in Firebase App Check
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,6 @@
++**Бесплатная версия Firebase Spark (обновление 22.10.2026): сначала прочтите [SPARK_ЗАПУСК_ПО_ШАГАМ.md](SPARK_ЗАПУСК_ПО_ШАГАМ.md).**
++Старая инструкция Firebase Functions/Storage относится к платному варианту и для Spark не применяется.
++
+ > **Обновление 22.10.2026:** перед подключением Firebase прочитайте [`FINAL_CHANGES_2026_10_22_RU.md`](./FINAL_CHANGES_2026_10_22_RU.md): меню, музыка/громкость, регистрация клиентов, корзина и ограничения тестирования.
+ 
+ > **Исправленная версия от 22.10.2026:** сначала ознакомьтесь с [`REPAIR_REPORT_2026_10_22_RU.md`](REPAIR_REPORT_2026_10_22_RU.md). Ошибки со скриншотов исправлены в коде; полная сборка и подключённый Firebase требуют проверки на вашем компьютере.
+--- a/firestore.rules
++++ b/firestore.rules
+@@ -1,29 +1,147 @@
+ rules_version = '2';
++// Spark-only. Publish these rules before using the Spark data adapter.
++// Admin privileges come ONLY from Firebase Auth custom claims, never from browser variables.
+ service cloud.firestore {
+   match /databases/{database}/documents {
+-    function loggedIn(){return request.auth != null;}
+-    function admin(){return loggedIn() && request.auth.token.admin == true;}
+-    function own(){return loggedIn() && resource.data.userId == request.auth.uid;}
+-    match /siteContent/{id} {allow read: if true; allow write: if admin();}
+-    match /services/{id} {allow read: if true; allow write: if admin();}
+-    match /masters/{id} {allow read: if true; allow write: if admin();}
+-    match /products/{id} {allow read: if true; allow write: if admin();}
+-    match /categories/{id} {allow read: if true; allow write: if admin();}
++    function loggedIn() { return request.auth != null; }
++    function admin() { return loggedIn() && request.auth.token.admin == true; }
++    function own() { return loggedIn() && resource.data.userId == request.auth.uid; }
++    function bookingAfter(id) { return getAfter(/databases/$(database)/documents/bookings/$(id)).data; }
++    function lockAfter(key) { return getAfter(/databases/$(database)/documents/reservationLocks/$(key)).data; }
++    function validBookingSlot(i) {
++      let b = request.resource.data;
++      let key = b.lockKeys[i];
++      let l = lockAfter(key);
++      return key == b.masterId + '|' + b.date + '|' + string(b.startMinute + i * 30)
++        && l.bookingId == b.id && l.userId == request.auth.uid
++        && l.masterId == b.masterId && l.date == b.date
++        && l.minute == b.startMinute + i * 30;
++    }
++    function allBookingSlots() {
++      let n = request.resource.data.lockKeys.size();
++      return validBookingSlot(0)
++        && (n < 2 || validBookingSlot(1))
++        && (n < 3 || validBookingSlot(2))
++        && (n < 4 || validBookingSlot(3))
++        && (n < 5 || validBookingSlot(4))
++        && (n < 6 || validBookingSlot(5))
++        && (n < 7 || validBookingSlot(6))
++        && (n < 8 || validBookingSlot(7));
++    }
++    function validBooking(id) {
++      let b = request.resource.data;
++      return loggedIn()
++        && b.keys().hasOnly(['id','name','phone','date','time','startMinute','lockKeys','serviceIds','serviceNames','masterId','masterName','total','duration','status','createdAt','note','userId'])
++        && b.id == id && b.userId == request.auth.uid
++        && b.status == 'pending'
++        && b.name is string && b.name.size() >= 2 && b.name.size() <= 100
++        && b.phone is string && b.phone.size() >= 8 && b.phone.size() <= 35
++        && b.note is string && b.note.size() <= 1000
++        && b.date is string && b.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
++        && b.time is string && b.time.matches('^([01][0-9]|2[0-3]):(00|30)$')
++        && b.masterId is string && b.masterId.matches('^[A-Za-z0-9_-]{1,90}$')
++        && b.serviceIds is list && b.serviceIds.size() >= 1 && b.serviceIds.size() <= 8
++        && b.serviceNames is list && b.serviceNames.size() == b.serviceIds.size()
++        && b.startMinute is int && b.startMinute >= 540 && b.startMinute <= 1170 && b.startMinute % 30 == 0
++        && b.duration is number && b.duration >= 15 && b.duration <= 240
++        && b.total is number && b.total >= 0 && b.total <= 10000000
++        && b.lockKeys is list && b.lockKeys.size() >= 1 && b.lockKeys.size() <= 8
++        && b.lockKeys.size() * 30 >= b.duration && (b.lockKeys.size() - 1) * 30 < b.duration
++        && b.createdAt is string && b.createdAt.size() <= 40
++        && allBookingSlots();
++    }
++    function itemValid(items,i) {
++      let v = items[i];
++      let p = get(/databases/$(database)/documents/products/$(v.id)).data;
++      return v is map && v.keys().hasOnly(['id','quantity','price','name'])
++        && v.id is string && v.quantity is int && v.quantity >= 1 && v.quantity <= 20
++        && v.price is number && v.price >= 0 && v.price == p.price
++        && v.name is string && v.name == p.name
++        && (!('active' in p) || p.active == true);
++    }
++    function itemsValid(items) {
++      let n = items.size();
++      return itemValid(items,0)
++        && (n < 2 || itemValid(items,1))
++        && (n < 3 || itemValid(items,2))
++        && (n < 4 || itemValid(items,3))
++        && (n < 5 || itemValid(items,4))
++        && (n < 6 || itemValid(items,5))
++        && (n < 7 || itemValid(items,6))
++        && (n < 8 || itemValid(items,7));
++    }
++    function lineTotal(items,i){ return items.size() <= i ? 0 : items[i].price * items[i].quantity; }
++    function validOrder(id){
++      let o = request.resource.data;
++      return loggedIn() && o.keys().hasOnly(['id','name','phone','items','total','date','status','userId'])
++        && o.id == id && o.userId == request.auth.uid && o.status == 'pending'
++        && o.name is string && o.name.size() >= 2 && o.name.size() <= 100
++        && o.phone is string && o.phone.size() >= 8 && o.phone.size() <= 35
++        && o.date is string && o.date.size() <= 40
++        && o.items is list && o.items.size() >= 1 && o.items.size() <= 8
++        && itemsValid(o.items)
++        && o.total == lineTotal(o.items,0)+lineTotal(o.items,1)+lineTotal(o.items,2)+lineTotal(o.items,3)
++          +lineTotal(o.items,4)+lineTotal(o.items,5)+lineTotal(o.items,6)+lineTotal(o.items,7);
++    }
++
++    match /siteContent/{id} { allow read: if true; allow write: if admin(); }
++    match /services/{id} { allow read: if true; allow write: if admin(); }
++    match /masters/{id} { allow read: if true; allow write: if admin(); }
++    match /products/{id} { allow read: if true; allow write: if admin(); }
++    match /categories/{id} { allow read: if true; allow write: if admin(); }
++    match /masterHours/{id} { allow read: if true; allow write: if admin(); }
++    match /blockedSlots/{id} { allow read: if true; allow write: if admin(); }
+     match /reviews/{id} {
+-      allow get: if admin() || resource.data.approved == true;
+-      allow list: if admin() || resource.data.approved == true;
+-      allow write: if admin();
++      allow get, list: if admin() || resource.data.approved == true;
++      allow create: if loggedIn() && id == 'user_' + request.auth.uid
++        && request.resource.data.keys().hasOnly(['id','name','text','rating','approved','userId','createdAt'])
++        && request.resource.data.id == id && request.resource.data.userId == request.auth.uid
++        && request.resource.data.approved == false
++        && request.resource.data.name is string && request.resource.data.name.size() >= 2 && request.resource.data.name.size() <= 90
++        && request.resource.data.text is string && request.resource.data.text.size() >= 12 && request.resource.data.text.size() <= 1800
++        && request.resource.data.rating is int && request.resource.data.rating >= 1 && request.resource.data.rating <= 5;
++      allow update, delete: if admin();
+     }
+-    match /masterHours/{id} {allow read: if admin(); allow write: if admin();}
+-    match /blockedSlots/{id} {allow read: if admin(); allow write: if admin();}
+-    match /bookings/{id} {allow read: if admin() || own(); allow write: if false;}
+-    match /orders/{id} {allow read: if admin() || own(); allow create, update, delete: if false;}
+-    match /reservationLocks/{id} {allow read, write: if false;}
++    match /bookings/{bookingId} {
++      allow get, list: if admin() || own();
++      allow create: if validBooking(bookingId);
++      allow update: if admin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
++        && request.resource.data.status in ['confirmed','cancelled']
++        && !(resource.data.status == 'cancelled' && request.resource.data.status != 'cancelled');
++      allow delete: if false;
++    }
++    match /reservationLocks/{lockId} {
++      // These contain only machine-readable occupancy data, never client contact information.
++      allow get, list: if true;
++      allow create: if loggedIn() && request.resource.data.keys().hasOnly(['bookingId','userId','masterId','date','minute'])
++        && request.resource.data.bookingId is string
++        && request.resource.data.userId == request.auth.uid
++        && request.resource.data.masterId is string
++        && request.resource.data.date is string
++        && request.resource.data.minute is int
++        && lockId == request.resource.data.masterId + '|' + request.resource.data.date + '|' + string(request.resource.data.minute)
++        && bookingAfter(request.resource.data.bookingId).id == request.resource.data.bookingId
++        && bookingAfter(request.resource.data.bookingId).userId == request.auth.uid
++        && bookingAfter(request.resource.data.bookingId).status == 'pending'
++        && bookingAfter(request.resource.data.bookingId).masterId == request.resource.data.masterId
++        && bookingAfter(request.resource.data.bookingId).date == request.resource.data.date
++        && bookingAfter(request.resource.data.bookingId).lockKeys.hasAny([lockId]);
++      allow update: if false;
++      allow delete: if admin();
++    }
++    match /orders/{id} {
++      allow get, list: if admin() || own();
++      allow create: if validOrder(id);
++      allow update: if admin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
++        && request.resource.data.status in ['pending','processing','completed','cancelled'];
++      allow delete: if false;
++    }
+     match /users/{id} {
+       allow read: if admin() || (loggedIn() && request.auth.uid == id);
+-      allow create, update: if loggedIn() && request.auth.uid == id && !('role' in request.resource.data);
++      allow create, update: if loggedIn() && request.auth.uid == id
++        && !('role' in request.resource.data);
+       allow delete: if false;
+     }
+-    match /{document=**} {allow read, write: if false;}
++    match /{document=**} { allow read, write: if false; }
+   }
+ }
+--- /dev/null
++++ b/SPARK_ЗАПУСК_ПО_ШАГАМ.md
+@@ -0,0 +1,121 @@
++# EL BEM BEAUTY — запуск на бесплатном Firebase Spark
++
++## Что сохраняется в интернете
++Firebase Authentication: аккаунты клиентов и пароль администратора.
++Firestore: товары, категории, услуги, мастера, тексты, расписание, заблокированное время,
++записи, статусы, заказы и отзывы. База одна для всех устройств.
++
++Фотографии и музыка: обычные публичные HTTPS-ссылки, либо файлы внутри `public`.
++Firestore хранит **адрес** файла, но не содержимое загружаемого файла.
++Для нового фото/аудио, которого ещё нет в интернете, добавьте файл в папку `public`
++(например, `public/images/master.jpg` или `public/music.mp3`), используйте ссылку
++`/images/master.jpg` или `/music.mp3` и заново опубликуйте сайт на Vercel.
++Владелец может выбирать уже опубликованные фотографии и менять их ссылки в админке.
++Загрузка нового файла с компьютера напрямую через админку на Spark недоступна.
++
++## Ваша текущая настройка уже сохранена
++- Firebase-проект `el-bem-beauty` и тариф Spark: ничего создавать заново не надо.
++- Authentication Email/Password: включён.
++- Firestore `(default)`: создан.
++- Вы уже назначили администратору роль через `grant-admin.cjs`.
++- Ваш `.env.local` содержит нужные публичные параметры и VITE_ADMIN_LOGIN_EMAIL.
++- **Не стирайте `.env.local`**, **не вставляйте пароль в сайт** и **не передавайте JSON-ключ**.
++
++## Что сделать по порядку
++
++### 1. Обновить код
++Откройте в VS Code терминал в КОРНЕ проекта, рядом с `package.json`.
++Скопируйте `EL_BEM_SPARK_ONLY.patch` туда и выполните:
++
++```
++git apply --check EL_BEM_SPARK_ONLY.patch
++git apply EL_BEM_SPARK_ONLY.patch
++```
++
++Патч рассчитан на версию `EL_BEM_BEAUTY_FIREBASE_FINAL_UI_2026_10_22.zip`
++с уже применённым `EL_BEM_ADMIN_PASSWORD_ONLY.patch`.
++Он **не затрагивает `.env.local`**.
++
++### 2. Опубликовать НОВЫЕ правила
++Firebase Console -> Firestore -> вкладка Rules.
++В VS Code откройте `firestore.rules`, скопируйте ВЕСЬ код и замените правила в Firebase.
++Нажмите Publish. Старые правила из версии с Cloud Functions НЕ подойдут.
++**Не делайте `allow read, write: if true`.**
++
++### 3. Один раз загрузить каталог в Firestore
++В терминале VS Code перейдите в папку `functions`:
++
++```
++cd functions
++node scripts/seed-demo.cjs
++```
++
++Вы уже установили зависимости `functions` и настраивали переменные
++`GOOGLE_CLOUD_PROJECT` и `GOOGLE_APPLICATION_CREDENTIALS` при `grant-admin.cjs`.
++Если открыли новый терминал, эти переменные нужно повторно выставить.
++`GOOGLE_CLOUD_PROJECT` должен быть `el-bem-beauty`, а `GOOGLE_APPLICATION_CREDENTIALS`
++— путь к скачанному JSON-файлу в Downloads (ФАЙЛ НЕ КОПИРОВАТЬ В ПРОЕКТ).
++
++Скрипт добавляет только **отсутствующие** документы, не затирая существующие.
++Проверьте в Firestore -> Data коллекции: `services`, `masters`, `products`,
++`categories`, `siteContent`. Начальные данные из каталога — пример для первого запуска;
++для реального салона цены и названия нужно проверить в админке.
++
++### 4. Проверить сайт локально
++В Firebase Console -> Authentication -> Settings -> Authorized domains добавьте
++`localhost` для локальной разработки, если его нет (у новых проектов он обычно не добавлен автоматически).
++После публикации Vercel проверьте также домен Vercel.
++
++Вернитесь в корень проекта:
++
++```
++cd ..
++npm run typecheck
++npm run build
++npm run dev
++```
++
++В Firefox/Chrome откройте выданный Vite адрес. Проверьте:
++1. Регистрация нового клиента email+пароль (НЕ под админским email).
++2. Запись на услугу: выбор даты и свободного времени, отправка заявки.
++3. Откройте сайт в другом браузере: занятый интервал не должен предлагаться.
++4. Вход в `/admin` по паролю администратора (технический email уже в `.env.local`).
++5. В «Записи» заявка появляется; подтвердите/отмените. Отмена должна вернуть интервал.
++6. Измените цену товара; после обновления на другом устройстве она меняется.
++7. Оформите заказ; он появляется в «Заказы».
++8. Настройте URL публичной фотографии/музыки; убедитесь, что URL доступен со второго устройства.
++
++Если Firestore показывает `Missing or insufficient permissions`, проверьте,
++что были опубликованы именно новые `firestore.rules`, а текущий аккаунт клиента
++зарегистрирован, админ назначен и заново вошёл после назначения роли.
++
++### 5. GitHub + Vercel
++Залейте исходный проект на GitHub БЕЗ `.env.local`, `node_modules` и JSON-ключа.
++На Vercel выберите репозиторий, Framework Preset **Vite**,
++Build Command **npm run build**, Output Directory **dist**.
++В Vercel -> Project -> Settings -> Environment Variables добавьте все
++`VITE_FIREBASE_*` из `.env.local` и `VITE_ADMIN_LOGIN_EMAIL`.
++В Firebase Authentication -> Settings -> Authorized domains добавьте реальный домен Vercel
++(например, `example.vercel.app`), затем новый деплой.
++Регистрация клиентов и админ-вход по Firebase не требуют платного тарифа.
++
++## Ограничения бесплатной архитектуры
++- Cloud Functions не используются; серверное выполнение `functions/index.js` НЕ нужно.
++- Клиенту нужно войти перед созданием записи, заказа или отзыва.
++- Двойную запись на одно время исключают атомарные блокировки по 30 минут
++  в Firestore. Расписание и стоимость считаются по каталогу в клиенте;
++  администратор подтверждает заявку и итоговую стоимость до обслуживания.
++- Общая длительность одной записи ограничена 4 часами, а один заказ содержит до
++  8 разных товаров, максимум 20 единиц каждого.
++- Без серверного backend нет полноценной антиспам/проверки сложной бизнес-логики.
++  Для небольшого салона используйте ручное подтверждение записи и заказа.
++- Фотографии/музыку без отдельного хранилища нельзя произвольно загружать в админке
++  и сразу показывать всем. Изменяемые URL изображений в Firestore работают.
++- В браузерах автозапуск звука может быть заблокирован до первого действия пользователя.
++- Отдельный платёжный сервис не подключён. Заказ фиксируется, но **не означает оплату**.
++- При превышении бесплатных квот Spark база может временно перестать обслуживать запросы.
++
++## ВАЖНО
++Тесты с настоящим проектом Firebase и полноценная сборка Vite должны быть выполнены
++на вашем Mac. В среде подготовки пакетов npm registry был недоступен.
++Нельзя считать проект окончательно запущенным до этих проверок.
+--- a/firebase.json
++++ b/firebase.json
+@@ -1,5 +1,3 @@
+ {
+-  "firestore": {"rules":"firestore.rules"},
+-  "storage": {"rules":"storage.rules"},
+-  "functions": [{"source":"functions","codebase":"default","runtime":"nodejs22"}]
++  "firestore": {"rules": "firestore.rules"}
+ }
+--- a/package.json
++++ b/package.json
+@@ -10,8 +10,9 @@
+     "typecheck": "tsc --noEmit",
+     "check:i18n": "node scripts/check-translations.mjs",
+     "test:functions": "node --test functions/tests/functions.test.cjs",
+-    "verify": "npm run typecheck && npm run check:i18n && npm run test:functions && npm run test:ui-contracts && npm run build",
+-    "test:ui-contracts": "node --test scripts/test-final-ui-contracts.cjs"
++    "verify": "npm run typecheck && npm run check:i18n && npm run test:spark && npm run test:ui-contracts && npm run build",
++    "test:ui-contracts": "node --test scripts/test-final-ui-contracts.cjs",
++    "test:spark": "node --test scripts/test-spark-logic.cjs"
+   },
+   "dependencies": {
+     "lucide-react": "^0.468.0",
+--- /dev/null
++++ b/scripts/test-spark-logic.cjs
+@@ -0,0 +1,90 @@
++/** Offline Spark business-logic tests with an in-memory Firestore mock.
++ * This is NOT a Firestore Security Rules emulator and does not contact Firebase.
++ */
++const {test,beforeEach}=require('node:test');
++const assert=require('node:assert/strict');
++const fs=require('node:fs');
++const path=require('node:path');
++let ts;try{ts=require('typescript')}catch{ts=require('/opt/nvm/versions/node/v22.16.0/lib/node_modules/typescript')}
++const data=new Map();
++const auth={currentUser:{uid:'client1'}};
++const fakeDb={};
++let admin=false;
++function snapshot(ref){const val=data.get(ref.path);return {id:ref.id,exists:()=>val!==undefined,data:()=>val};}
++const fb={
++ collection:(_db,name)=>({path:name}),
++ doc:(a,b,c)=>{
++   if(c!==undefined)return {path:`${b}/${c}`,id:c};
++   if(b!==undefined)return {path:`${a.path}/${b}`,id:b};
++   const id='test-'+Math.random().toString(36).slice(2);
++   return {path:`${a.path}/${id}`,id};
++ },
++ getDoc:async ref=>snapshot(ref),
++ where:(field,op,value)=>({field,op,value}),
++ query:(col,filter)=>({path:col.path,filter}),
++ getDocs:async ref=>({docs:[...data.entries()].filter(([key,v])=>key.startsWith(ref.path+'/')&&(!ref.filter||v[ref.filter.field]===ref.filter.value)).map(([key])=>snapshot({path:key,id:key.slice(key.lastIndexOf('/')+1)}))}),
++ setDoc:async (ref,obj,opts)=>{data.set(ref.path,{...(opts?.merge?data.get(ref.path):{}),...obj})},
++ deleteDoc:async ref=>{data.delete(ref.path)},
++ onSnapshot:()=>()=>{},
++ runTransaction:async (_db,fn)=>{
++   const commands=[];
++   const tx={get:async ref=>snapshot(ref),set:(ref,v)=>commands.push(['set',ref,v]),update:(ref,v)=>commands.push(['update',ref,v]),delete:ref=>commands.push(['delete',ref])};
++   const result=await fn(tx);
++   for(const [kind,ref,v] of commands){if(kind==='delete')data.delete(ref.path);else data.set(ref.path,kind==='update'?{...(data.get(ref.path)||{}),...v}:v)}
++   return result;
++ }
++};
++function loadTS(relative,customRequire){
++ const code=fs.readFileSync(path.join(__dirname,'..',relative),'utf8');
++ const compiled=ts.transpileModule(code,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
++ const module={exports:{}};
++ new Function('require','module','exports','crypto',compiled)((name)=>customRequire(name),module,module.exports,globalThis.crypto||require('node:crypto').webcrypto);
++ return module.exports;
++}
++const domain=loadTS('src/data.ts',()=>{throw Error('unexpected import')});
++const store=loadTS('src/store.ts',name=>{
++ if(name==='firebase/firestore')return fb;
++ if(name==='firebase/auth')return {getIdTokenResult:async()=>({claims:{admin}})};
++ if(name==='./firebase')return {db:fakeDb,auth,configured:true};
++ if(name==='./data')return domain;
++ throw Error('unexpected import '+name);
++});
++function seed(){
++ data.clear();admin=false;auth.currentUser={uid:'client1'};
++ for(const service of domain.services)data.set('services/'+service.id,{...service,active:true});
++ for(const master of domain.masters)data.set('masters/'+master.id,{...master,active:true});
++ for(const product of domain.products)data.set('products/'+product.id,{...product,active:true});
++}
++beforeEach(seed);
++const tomorrow=()=>new Date(Date.now()+6*3600*1000+86400*1000).toISOString().slice(0,10);
++const bk=(time='10:00')=>({id:'client-request',name:'Test Client',phone:'+996700123456',date:tomorrow(),time,masterId:'m1',serviceIds:['s1'],total:0,status:'pending',createdAt:new Date().toISOString()});
++test('records occupancy for all 30-minute intervals and blocks overlapping booking',async()=>{
++ const a=await store.createBooking(bk());assert.equal(a.masterId,'m1');
++ assert.equal([...data.keys()].filter(k=>k.startsWith('reservationLocks/')).length,2);
++ await assert.rejects(()=>store.createBooking(bk('10:30')),/занят|занято/i);
++});
++test('releasing locks on cancellation returns slot to availability',async()=>{
++ const a=await store.createBooking(bk());
++ admin=true;auth.currentUser={uid:'owner'};
++ await store.updateBookingStatus(a.id,'cancelled');
++ assert.equal([...data.keys()].filter(k=>k.startsWith('reservationLocks/')).length,0);
++ auth.currentUser={uid:'client1'};admin=false;
++ assert.ok((await store.availableSlots(tomorrow(),['s1'],'m1')).includes('10:00'));
++});
++test('does not trust client-side order prices and derives totals from catalog',async()=>{
++ const p=domain.products[0];const saved=await store.makeOrder({id:'local',name:'Client',phone:'+996700123456',items:[{id:p.id,quantity:2,price:1}],total:2,date:''});
++ assert.equal(saved.total,p.price*2);assert.equal(saved.items[0].price,p.price);assert.equal(saved.userId,'client1');
++});
++test('requires authentication for orders and bookings',async()=>{
++ auth.currentUser=null;
++ await assert.rejects(()=>store.createBooking(bk()),/Войдите/i);
++ await assert.rejects(()=>store.makeOrder({name:'Client',phone:'+996700123456',id:'xx',items:[{id:'p1',quantity:1,price:1}],total:1,date:''}),/Войдите/i);
++});
++test('requires admin role to change booking status',async()=>{
++ const a=await store.createBooking(bk());
++ await assert.rejects(()=>store.updateBookingStatus(a.id,'cancelled'),/роль администратора/);
++});
++test('prevents second review by the same client',async()=>{
++ await store.submitReview('Client','Очень понравился сервис!',5);
++ await assert.rejects(()=>store.submitReview('Client','Повторяю отзыв еще раз',5),/уже оставляли/i);
++});
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -6,7 +6,7 @@
+ import {LanguageSelector,RatingStars,SearchField,AdminMetric,MoneyAmount,EmptyMessage,StatusPill,GalleryAdminItem,BookingActions,OrderStatusSelect} from './components/Shared';
+ import {ArrowRight,ArrowUpRight,ArrowLeft,CalendarDays,Check,ChevronDown,Clock,Heart,Instagram,Menu,X,ShoppingBag,ShoppingCart,UserRound,Volume2,VolumeX,Sun,Moon,Scissors,GraduationCap,MapPin,Phone,Plus,Minus,Trash2,Settings,LayoutDashboard,Image,Tag,Music2,ShieldCheck,LogOut,Search,Star,MessageCircle,PenLine,Save,Users,Package,BookOpen,Lock,Eye,EyeOff} from 'lucide-react';
+ import{gallery,money,type Booking,type Service,type Master,type Product,type Content}from './data';
+-import{configured,auth,readDemo,writeDemo,readLive,saveEntity,deleteEntity,createBooking,makeOrder,checkAdmin,availableSlots,getMyData,subscribeAdminBookings,uploadMedia,getMasterHours,saveMasterHour,deleteBlock,saveCategory,renameCatalogCategory,updateBookingStatus,submitReview,updateOrderStatus,type Order,type CatalogCategory,type State}from './store';
++import{configured,auth,readDemo,writeDemo,readLive,saveEntity,deleteEntity,createBooking,makeOrder,checkAdmin,availableSlots,getMyData,subscribeAdminBookings,subscribeAdminOrders,getMasterHours,saveMasterHour,deleteBlock,saveCategory,renameCatalogCategory,updateBookingStatus,submitReview,updateOrderStatus,type Order,type CatalogCategory,type State}from './store';
+ const routes=['Главная','Услуги','Мастера','Запись','Обучение','Магазин','Галерея','Отзывы','О нас','Контакты','Кабинет'];
+ const bishkekDate=(date:Date)=>{const parts=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Bishkek',day:'2-digit',month:'2-digit',year:'numeric'}).formatToParts(date);const val=(k:string)=>parts.find(p=>p.type===k)?.value||'';return `${val('year')}-${val('month')}-${val('day')}`};
+ const today=()=>bishkekDate(new Date());
+@@ -17,7 +17,7 @@
+ const IconButton=({icon:Icon,label,onClick,badge}:{icon:typeof Menu;label:string;onClick:()=>void;badge?:number})=><button aria-label={label} title={label} className="icon-button" onClick={onClick}><Icon size={19} strokeWidth={1.8}/>{badge? <span className="count">{badge}</span>:null}</button>;
+ const Section=({eyebrow,title,children,action}:{eyebrow:string;title:string;children:React.ReactNode;action?:React.ReactNode})=>{const {t}=useTranslation();return <section className="section shell"><div className="section-heading"><div><div className="eyebrow">{t(eyebrow)}</div><h2>{t(title)}</h2></div>{action}</div>{children}</section>};
+ const BackgroundDecor=()=> <div className="bg-petals" aria-hidden="true"><span className="petal petal-1"/><span className="petal petal-2"/><span className="petal petal-3"/><span className="petal petal-4"/><span className="petal petal-5"/><span className="petal petal-6"/><span className="petal petal-7"/></div>;
+- const ImageUpload=({value,onChange,label,uploadImage,uploading,library=[]}:{value:string;onChange:(v:string)=>void;label:string;uploadImage:(file:File,onSaved:(url:string)=>void)=>Promise<void>;uploading:boolean;library?:string[]})=>{const {t}=useTranslation();return <div className="admin-image-picker"><label className="field">{label}  {t("— ссылка")}<input value={value||''} onChange={e=>onChange(e.target.value)} placeholder="https://..."/></label><label className="field">{t("Или загрузить фото с устройства")}<input type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/avif" disabled={uploading} onChange={e=>{const f=e.target.files?.[0];if(f)void uploadImage(f,onChange);e.target.value=''}}/></label>{library.length>0&&<label className="field">Или выбрать из галереи<select value="" onChange={e=>{if(e.target.value)onChange(e.target.value)}}><option value="">Выберите фотографию</option>{library.map((image,i)=><option value={image} key={i}>Фотография {i+1}</option>)}</select></label>}{value&&<div className="admin-preview"><MediaImage src={value} alt="Предпросмотр изображения"/><span>{t("Так фотография будет кадрироваться в карточке")}</span></div>}</div>;};
++ const ImageUpload=({value,onChange,label,uploadImage,uploading,library=[]}:{value:string;onChange:(v:string)=>void;label:string;uploadImage:(file:File,onSaved:(url:string)=>void)=>Promise<void>;uploading:boolean;library?:string[]})=>{const {t}=useTranslation();return <div className="admin-image-picker"><label className="field">{label}  {t("— ссылка")}<input value={value||''} onChange={e=>onChange(e.target.value)} placeholder="https://..."/></label>{!configured?<label className="field">{t("Или загрузить фото с устройства")}<input type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/avif" disabled={uploading} onChange={e=>{const f=e.target.files?.[0];if(f)void uploadImage(f,onChange);e.target.value=''}}/></label>:<p className="hint">На бесплатном Firebase укажите публичную HTTPS-ссылку или путь /images/имя.jpg из папки public. Файл с компьютера нельзя загрузить напрямую.</p>}{library.length>0&&<label className="field">Или выбрать из галереи<select value="" onChange={e=>{if(e.target.value)onChange(e.target.value)}}><option value="">Выберите фотографию</option>{library.map((image,i)=><option value={image} key={i}>Фотография {i+1}</option>)}</select></label>}{value&&<div className="admin-preview"><MediaImage src={value} alt="Предпросмотр изображения"/><span>{t("Так фотография будет кадрироваться в карточке")}</span></div>}</div>;};
+ export default function App(){
+  const {t,i18n}=useTranslation();
+  const navigate=useNavigate();const location=useLocation();
+@@ -44,6 +44,7 @@
+  useEffect(()=>{if(!configured)writeDemo(state)},[state]);
+  useEffect(()=>{if(!configured||!adminAuth)return;void readLive(true).then(setState).catch(e=>setConnectedError(String(e)))},[adminAuth]);
+  useEffect(()=>{if(!configured||!adminAuth)return;return subscribeAdminBookings(bookings=>setState(old=>({...old,bookings})))},[adminAuth]);
++ useEffect(()=>{if(!configured||!adminAuth)return;return subscribeAdminOrders(orders=>setState(old=>({...old,orders})))},[adminAuth]);
+  useEffect(()=>{document.documentElement.dataset.theme=dark?'dark':'light';localStorage.setItem('elbem-theme',dark?'dark':'light')},[dark]);
+  useEffect(()=>{localStorage.setItem('elbem-cart',JSON.stringify(cart))},[cart]);
+  useEffect(()=>{localStorage.setItem('elbem-favorites',JSON.stringify(fav))},[fav]);
+@@ -77,10 +78,10 @@
+  useEffect(()=>{if(!configured||!bookingServices.length){setServerSlots([]);return;}let active=true;setSlotsLoading(true);void availableSlots(bookingDate,bookingServices,bookingMaster).then(slots=>{if(active)setServerSlots(slots)}).catch(e=>{if(active){setServerSlots([]);setConnectedError(String(e))}}).finally(()=>{if(active)setSlotsLoading(false)});return()=>{active=false}},[bookingDate,bookingMaster,bookingServices.join(','),state.bookings.length,state.blocked.length]);
+  const displayedTimes=configured?serverSlots:freeTimes;
+  const wa=(msg:string)=>{const number=(state.content.whatsapp||import.meta.env.VITE_SALON_WHATSAPP||'').replace(/\D/g,'');if(!number){alert('Номер WhatsApp пока не указан. Пожалуйста, свяжитесь с салоном другим способом.');return}window.open(`https://wa.me/${number}?text=${encodeURIComponent(msg)}`,'_blank','noopener,noreferrer')};
+- const submitBooking=async()=>{if(bookingBusy)return;if(!picked.length||!bookingTime||!displayedTimes.includes(bookingTime)||!customer.name.trim()||!/^\+?\d[\d\s()\-]{7,}$/.test(customer.phone)||!consent){alert('Выберите услуги, время, заполните имя и телефон и подтвердите согласие');return}setBookingBusy(true);const b:Booking={id:uid(),name:safeText(customer.name),phone:customer.phone,date:bookingDate,time:bookingTime,masterId:bookingMaster,serviceIds:bookingServices,total,status:'pending',note:safeText(customer.note),createdAt:new Date().toISOString()};try{if(configured){const saved=await createBooking(b);b.id=saved.id;b.masterId=saved.masterId;b.total=saved.total}change('bookings',[b,...state.bookings]);setSubmitted(b);alert(configured?'Заявка сохранена в Firebase. Ожидайте подтверждения администратора.':'Заявка создана. Ожидайте подтверждения администратора.')}catch(e){alert(`Не удалось сохранить запись: ${String(e)}`)}finally{setBookingBusy(false)}};
++ const submitBooking=async()=>{if(bookingBusy)return;if(configured&&!auth?.currentUser){setAuthMode('signup');setAuthOpen(true);alert('Для записи создайте аккаунт или войдите.');return;}if(!picked.length||!bookingTime||!displayedTimes.includes(bookingTime)||!customer.name.trim()||!/^\+?\d[\d\s()\-]{7,}$/.test(customer.phone)||!consent){alert('Выберите услуги, время, заполните имя и телефон и подтвердите согласие');return}setBookingBusy(true);const b:Booking={id:uid(),name:safeText(customer.name),phone:customer.phone,date:bookingDate,time:bookingTime,masterId:bookingMaster,serviceIds:bookingServices,total,status:'pending',note:safeText(customer.note),createdAt:new Date().toISOString()};try{if(configured){const saved=await createBooking(b);b.id=saved.id;b.masterId=saved.masterId;b.total=saved.total}change('bookings',[b,...state.bookings]);setSubmitted(b);alert(configured?'Заявка сохранена в Firebase. Ожидайте подтверждения администратора.':'Заявка создана. Ожидайте подтверждения администратора.')}catch(e){alert(`Не удалось сохранить запись: ${String(e)}`)}finally{setBookingBusy(false)}};
+  const cartTotal=Object.entries(cart).reduce((sum,[id,n])=>sum+(state.products.find(p=>p.id===id)?.price||0)*n,0);
+  const [orderName,setOrderName]=useState('');const[orderPhone,setOrderPhone]=useState('');const [orderBusy,setOrderBusy]=useState(false);const [bookingBusy,setBookingBusy]=useState(false);
+- const submitOrder=async(channel:'whatsapp'|'telegram'='whatsapp')=>{if(orderBusy)return;if(!orderName.trim()||!/^\+?\d[\d\s()\-]{7,}$/.test(orderPhone)||!Object.keys(cart).some(id=>cart[id]>0)){alert('Заполните контактные данные и добавьте товары');return}
++ const submitOrder=async(channel:'whatsapp'|'telegram'='whatsapp')=>{if(orderBusy)return;if(configured&&!auth?.currentUser){setAuthMode('signup');setAuthOpen(true);alert('Для оформления заказа войдите или зарегистрируйтесь.');return;}if(Object.keys(cart).length>8){alert('В одном заказе можно оформить до 8 разных товаров. Разделите корзину на два заказа.');return;}if(!orderName.trim()||!/^\+?\d[\d\s()\-]{7,}$/.test(orderPhone)||!Object.keys(cart).some(id=>cart[id]>0)){alert('Заполните контактные данные и добавьте товары');return}
+   setOrderBusy(true);
+   const telegramLink=telegramOwnerLink();
+   const whatsappNumber=(content.whatsapp||import.meta.env.VITE_SALON_WHATSAPP||'').replace(/\D/g,'');
+@@ -190,11 +191,12 @@
+  const changeAdminPassword=async()=>{if(!configured||!auth?.currentUser?.email){alert('Войдите через Firebase Auth');return}if(newAdminPassword.length<12){alert('Новый пароль должен содержать не менее 12 символов');return}try{const credential=EmailAuthProvider.credential(auth.currentUser.email,currentAdminPassword);await reauthenticateWithCredential(auth.currentUser,credential);await updatePassword(auth.currentUser,newAdminPassword);setCurrentAdminPassword('');setNewAdminPassword('');alert('Пароль изменён')}catch(e){alert('Не удалось изменить пароль: '+String(e))}};
+  const uploadImage=async(file:File,onSaved:(url:string)=>void)=>{
+   if(!/^image\/(jpeg|png|webp|gif|avif)$/.test(file.type)){alert('Выберите JPEG, PNG, WebP, GIF или AVIF. HEIC сначала переведите в JPEG.');return}
+-  if(file.size>(configured?10:25)*1024*1024){alert(configured?'Максимум 10 МБ для Firebase Storage':'Максимум 25 МБ для локальной галереи');return}
++  if(file.size>25*1024*1024){alert('Размер изображения не должен превышать 25 МБ');return}
+   setUploading(true);
+   try{
+     if(configured){
+-      onSaved(await uploadMedia(file,'site'));
++      alert('На бесплатном тарифе используйте ссылку HTTPS или файл из папки public. Для нового изображения добавьте его в проект и повторно опубликуйте сайт.');
++      return;
+     }else{
+       // Stored across reloads on this device; media doesn't exhaust localStorage.
+       onSaved(await saveLocalImage(file));
+@@ -204,15 +206,15 @@
+   finally{setUploading(false)}
+  };
+ 
+- const uploadAudio=async(file:File,onSaved:(url:string)=>void)=>{const types=['audio/mpeg','audio/mp3','audio/wav','audio/x-wav','audio/ogg','audio/mp4','audio/x-m4a'];if(!types.includes(file.type)&&!/\.(mp3|wav|ogg|m4a)$/i.test(file.name)){alert('Допустимые форматы: MP3, WAV, OGG, M4A');return}if(file.size>20*1024*1024){alert('Для музыки установлен лимит 20 МБ');return}setUploading(true);try{if(configured)onSaved(await uploadMedia(file,'audio'));else{onSaved(URL.createObjectURL(file));alert('Музыка загружена. Настройки начнут действовать после сохранения.')}}catch(e){alert('Не удалось загрузить аудио: '+String(e))}finally{setUploading(false)}};
+- const saveEdit=async()=>{if(!edit||!editTable)return;setSaving(true);try{if(configured){const payload={...edit};if(editTable==='reviews'){delete payload.active;payload.rating=Math.max(1,Math.min(5,Number(payload.rating)||5));}await saveEntity(editTable,payload)}change(editTable,[...(state[editTable] as any[]).filter(x=>x.id!==edit.id),edit] as any);setEdit(null);alert('Сохранено')}catch(e){alert(String(e))}finally{setSaving(false)}};
++ const uploadAudio=async(file:File,onSaved:(url:string)=>void)=>{const types=['audio/mpeg','audio/mp3','audio/wav','audio/x-wav','audio/ogg','audio/mp4','audio/x-m4a'];if(!types.includes(file.type)&&!/\.(mp3|wav|ogg|m4a)$/i.test(file.name)){alert('Допустимые форматы: MP3, WAV, OGG, M4A');return}if(file.size>20*1024*1024){alert('Для музыки установлен лимит 20 МБ');return}setUploading(true);try{if(configured){alert('На бесплатном Firebase музыку добавляют как URL или файл /music.mp3 в public. Загрузка с компьютера через админку требует отдельного хранилища.');return;}else{onSaved(URL.createObjectURL(file));alert('Музыка загружена. Настройки начнут действовать после сохранения.')}}catch(e){alert('Не удалось загрузить аудио: '+String(e))}finally{setUploading(false)}};
++ const saveEdit=async()=>{if(!edit||!editTable)return;setSaving(true);try{if(configured){if(typeof edit.image==='string'&&/^(blob:|data:)/i.test(edit.image))throw Error('Фото с устройства нельзя сохранять как ссылку. Используйте HTTPS или /images/имя.jpg.');const payload={...edit};if(editTable==='reviews'){delete payload.active;payload.rating=Math.max(1,Math.min(5,Number(payload.rating)||5));}await saveEntity(editTable,payload)}change(editTable,[...(state[editTable] as any[]).filter(x=>x.id!==edit.id),edit] as any);setEdit(null);alert('Сохранено')}catch(e){alert(String(e))}finally{setSaving(false)}};
+  const remove=async(table:'services'|'masters'|'products'|'reviews',id:string)=>{if(!confirm('Удалить запись? Для коммерческой базы важна история связанных заказов.'))return;try{if(configured)await deleteEntity(table,id);change(table,(state[table] as any[]).filter(x=>x.id!==id) as any);alert('Удалено')}catch(e){alert(String(e))}};
+  const updateBooking=async(b:Booking,status:Booking['status'])=>{try{if(configured)await updateBookingStatus(b.id,status);change('bookings',state.bookings.map(x=>x.id===b.id?{...x,status}:x));alert('Статус обновлён')}catch(e){alert(String(e))}};
+  const salonMapLink=()=>{try{const raw=(content.addressMapUrl||'').trim();if(!raw)return null;const url=new URL(raw);return ['https:','http:'].includes(url.protocol)?url.href:null}catch{return null}};
+  const telegramOwnerLink=()=>{const raw=(content.telegramOwner||'').trim();const match=raw.match(/^(?:@|https?:\/\/(?:www\.)?t\.me\/)?([A-Za-z][A-Za-z0-9_]{4,31})\/?$/i);return match?`https://t.me/${match[1]}`:null};
+  const bookingTelegramText=(b:Booking)=>`EL BEM — заявка #${b.id.slice(0,8)}\nКлиент: ${b.name}\nТелефон: ${b.phone}\nУслуги: ${b.serviceIds.map((id,index)=>b.serviceNames?.[index]||state.services.find(s=>s.id===id)?.name||id).join(', ')}\nМастер: ${b.masterName||state.masters.find(m=>m.id===b.masterId)?.name||'Любой свободный'}\nДата: ${b.date} ${b.time}\nСтатус: ${b.status}\nКомментарий: ${b.note||'—'}`;
+  const sendTelegramManually=async(b:Booking)=>{const link=telegramOwnerLink();if(!link){alert('Сначала укажите @username владельца Telegram в Настройках и сохраните. Номер телефона не подходит.');setAdminPage('Настройки');return}try{await navigator.clipboard.writeText(bookingTelegramText(b));window.open(link,'_blank','noopener,noreferrer');alert('Заявка скопирована. В открывшемся Telegram вставьте текст и нажмите «Отправить». Автоматической отправки нет.')}catch{window.open(link,'_blank','noopener,noreferrer');alert('Telegram открыт. Скопируйте данные заявки вручную: браузер запретил доступ к буферу обмена.')}};
+- const saveContent=async()=>{try{if(configured)await saveEntity('site_content',{id:1,data:content});alert('Настройки сохранены')}catch(e){alert(String(e))}};
++ const saveContent=async()=>{try{if(configured&&[content.heroImage,content.academyImage,content.musicUrl,...(content.galleryImages||[])].some(x=>typeof x==='string'&&/^(blob:|data:)/i.test(x)))throw Error('Локальный файл недоступен другим устройствам. Используйте HTTPS-ссылку или файл из public.');if(configured)await saveEntity('site_content',{id:1,data:content});alert('Настройки сохранены')}catch(e){alert(String(e))}};
+  const addBlock=async()=>{const slot=scheduleMaster?`${scheduleMaster}|${scheduleDate}|${scheduleTime}`:`${scheduleDate}|${scheduleTime}`;if(state.blocked.includes(slot))return;try{if(configured)await saveEntity('blocked_slots',{slot});change('blocked',[...state.blocked,slot]);alert('Интервал закрыт')}catch(e){alert(String(e))}};
+  const Admin=()=> <div className="admin-shell"><aside className="admin-side"><div className="admin-brand">✦ EL BEM <small>CONTROL PANEL</small></div>{AdminNav.map(p=><button key={p} className={adminPage===p?'selected':''} onClick={()=>{setAdminPage(p);setEdit(null)}}>{p==='Обзор'?<LayoutDashboard size={17}/>:p==='Записи'?<CalendarDays size={17}/>:p==='Расписание'?<Clock size={17}/>:p==='Услуги'?<Scissors size={17}/>:p==='Мастера'?<Users size={17}/>:p==='Товары'?<Package size={17}/>:p==='Заказы'?<ShoppingCart size={17}/>:p==='Галерея'?<Image size={17}/>:p==='Категории'?<Tag size={17}/>:p==='Контент сайта'?<Image size={17}/>:p==='Отзывы'?<Star size={17}/>:<Settings size={17}/>}<span>{p}</span></button>)}<button onClick={()=>{setAdmin(false);go('Главная')}}><ArrowLeft size={17}/>  {t("Вернуться на сайт")}</button><button onClick={async()=>{auth&&await signOut(auth);setAdminAuth(false);alert('Вы вышли')}}><LogOut size={17}/>  {t("Выйти")}</button></aside><div className="admin-content"><div className="admin-top"><div><div className="eyebrow">{t("ПАНЕЛЬ ВЛАДЕЛЬЦА")}</div><h1>{adminPage}</h1></div><span className="status-pill">{configured?'Firebase':'Локальные данные'}</span></div>{adminPage==='Обзор'?<><div className="stat-grid">{[['Новые заявки',state.bookings.filter(b=>b.status==='pending').length],['Услуги',state.services.length],['Мастера',state.masters.length],['Товары',state.products.length]].map(([label,n])=><AdminMetric key={String(label)} name={String(label)} value={Number(n)}/>)}</div><div className="admin-panel"><h3>{t("Быстрые действия")}</h3><div className="admin-actions">{['Записи','Расписание','Услуги','Мастера','Контент сайта'].map(p=><button key={p} onClick={()=>setAdminPage(p)}>{p}<ArrowUpRight size={15}/></button>)}</div></div></>:null}
+  {adminPage==='Заказы'?<div className="admin-panel"><h3>Заказы клиентов</h3><div className="table-scroll"><table><thead><tr><th>Клиент</th><th>Товары</th><th>Итого</th><th>Дата</th><th>Статус</th></tr></thead><tbody>{state.orders.map(o=><tr key={o.id}><td>{o.name}<small>{o.phone}</small></td><td>{o.items.map(i=>`${i.name||state.products.find(p=>p.id===i.id)?.name||i.id} × ${i.quantity}`).join(', ')}</td><td>{money(o.total)}</td><td>{o.date.slice(0,16)}</td><td><OrderStatusSelect value={o.status||'pending'} onChange={async status=>{try{if(configured)await updateOrderStatus(o.id,status);change('orders',state.orders.map(x=>x.id===o.id?{...x,status}:x))}catch(err){alert(String(err))}}}/></td></tr>)}</tbody></table>{!state.orders.length&&<EmptyMessage>Заказов пока нет</EmptyMessage>}</div></div>:null}
+@@ -220,7 +222,7 @@
+  {adminPage==='Расписание'?<div className="admin-panel"><h3>{t("Доступное время")}</h3><p className="muted">{t("Задайте часы работы мастеров и закрытые интервалы для онлайн-записи.")}</p><div className="form-grid"><label className="field">{t("Мастер")}<select value={scheduleMaster} onChange={e=>setScheduleMaster(e.target.value)}><option value="">{t("Все мастера")}</option>{state.masters.map(m=><option value={m.id} key={m.id}>{itemText(m,'name',m.name)}</option>)}</select></label><label className="field">{t("Дата")}<input type="date" value={scheduleDate} onChange={e=>setScheduleDate(e.target.value)}/></label><label className="field">{t("Время")}<select value={scheduleTime} onChange={e=>setScheduleTime(e.target.value)}>{times.map(t=><option key={t}>{t}</option>)}</select></label><button className="btn btn-primary" onClick={addBlock}>{t("Закрыть интервал")} <Plus size={16}/></button></div><div className="schedule-weekly"><h4>Рабочие часы мастера</h4><p className="hint">Выберите мастера выше, затем день недели, начало и конец смены. Изменения сохраняются в Firebase.</p><div className="form-grid"><label className="field">День недели<select value={weekday} onChange={e=>setWeekday(Number(e.target.value))}>{['Воскресенье','Понедельник','Вторник','Среда','Четверг','Пятница','Суббота'].map((day,i)=><option value={i} key={day}>{day}</option>)}</select></label><label className="field">Начало смены<input type="time" value={opening} onChange={e=>setOpening(e.target.value)}/></label><label className="field">Конец смены<input type="time" value={closing} onChange={e=>setClosing(e.target.value)}/></label><label className="switch-row"><input type="checkbox" checked={working} onChange={e=>setWorking(e.target.checked)}/>Рабочий день</label></div><button className="btn btn-primary" onClick={saveWeekly}>Сохранить график <Save size={16}/></button></div><h4>Закрытые интервалы</h4><div className="chips">{state.blocked.map(slot=><button key={slot} onClick={async()=>{try{if(configured){await deleteBlock(slot)}change('blocked',state.blocked.filter(x=>x!==slot))}catch(e){alert(String(e))}}}>{slot} <X size={13}/></button>)}</div></div>:null}
+  {(['Услуги','Мастера','Товары','Отзывы'].includes(adminPage))?<div className="admin-panel"><div className="row-between"><h3>{adminPage}</h3><button className="btn btn-primary small-btn" onClick={()=>openEdit(adminPage==='Услуги'?'services':adminPage==='Мастера'?'masters':adminPage==='Товары'?'products':'reviews')}>{t("Добавить")} <Plus size={16}/></button></div><div className="admin-list">{(adminPage==='Услуги'?state.services:adminPage==='Мастера'?state.masters:adminPage==='Товары'?state.products:state.reviews).map((v:any)=><div className="admin-list-row" key={v.id}><MediaImage src={v.image||'https://placehold.co/80x80/eadfdc/633f51?text=EL+BEM'} alt=""/><div className="admin-list-info"><b>{v.name||v.text?.slice(0,50)}</b><span>{v.category||v.specialty||v.description||'Отзыв'} {typeof v.price==='number'?` · ${money(v.price)}`:''}</span></div><button onClick={()=>openEdit(adminPage==='Услуги'?'services':adminPage==='Мастера'?'masters':adminPage==='Товары'?'products':'reviews',v)} aria-label="Изменить"><PenLine size={17}/></button><button onClick={()=>remove(adminPage==='Услуги'?'services':adminPage==='Мастера'?'masters':adminPage==='Товары'?'products':'reviews',v.id)} aria-label="Удалить"><Trash2 size={17}/></button></div>)}</div></div>:null}
+    {adminPage==='Категории'?<div className="admin-panel"><div className="row-between"><h3>Категории услуг и магазина</h3><button className="btn btn-primary small-btn" onClick={()=>setCategoryEdit({id:uid(),name:'',kind:'service',image:'',active:true,sortOrder:state.categories.length})}>Добавить категорию <Plus size={16}/></button></div><p className="hint">Категории связываются с услугами и товарами по названию. Изменённые названия обновляются в связанных элементах.</p><div className="admin-list">{state.categories.slice().sort((a,b)=>a.sortOrder-b.sortOrder).map(c=><div className="admin-list-row" key={c.id}><MediaImage src={c.image||'https://placehold.co/80x80/eadfdc/633f51?text=EL+BEM'} alt=""/><div className="admin-list-info"><b>{c.name}</b><span>{c.kind==='service'?'Услуги':'Магазин'} · {c.active?'Опубликована':'Скрыта'}</span></div><button aria-label="Изменить категорию" onClick={()=>setCategoryEdit(c)}><PenLine size={17}/></button><button aria-label="Удалить категорию" onClick={()=>void categoryDelete(c)}><Trash2 size={17}/></button></div>)}</div></div>:null}
+-{adminPage==='Галерея'?<div className="admin-panel"><h3>Галерея салона</h3><p className="hint">Добавьте фото с устройства. После изменений нажмите «Сохранить галерею».</p><label className="field">Загрузить фотографию<input type="file" accept="image/jpeg,image/png,image/webp" disabled={uploading} onChange={e=>{const f=e.target.files?.[0];if(f)void uploadImage(f,url=>change('content',{...content,galleryImages:[...(content.galleryImages||[]),url]}));e.target.value=''}}/></label><div className="gallery-full">{(content.galleryImages||[]).map((photo,i)=><GalleryAdminItem key={photo+i} photo={photo} index={i} onRemove={()=>change('content',{...content,galleryImages:(content.galleryImages||[]).filter((_,j)=>j!==i)})}/>)}</div><button className="btn btn-primary" onClick={saveContent}>Сохранить галерею</button></div>:null}
++{adminPage==='Галерея'?<div className="admin-panel"><h3>Галерея салона</h3><p className="hint">Добавьте ссылку на фотографию или выберите изображение из библиотеки. После изменений нажмите «Сохранить галерею».</p><label className="field">Загрузить фотографию (только локальный режим)<input type="file" accept="image/jpeg,image/png,image/webp" disabled={configured||uploading} onChange={e=>{const f=e.target.files?.[0];if(f)void uploadImage(f,url=>change('content',{...content,galleryImages:[...(content.galleryImages||[]),url]}));e.target.value=''}}/></label><div className="gallery-full">{(content.galleryImages||[]).map((photo,i)=><GalleryAdminItem key={photo+i} photo={photo} index={i} onRemove={()=>change('content',{...content,galleryImages:(content.galleryImages||[]).filter((_,j)=>j!==i)})}/>)}</div><button className="btn btn-primary" onClick={saveContent}>Сохранить галерею</button></div>:null}
+ {adminPage==='Контент сайта'?<div className="admin-panel"><h3>{t("Изображения и тексты")}</h3><p className="muted">{t("Управляйте фотографиями салона и содержимым сайта.")}</p><div className="admin-fields"><div className="admin-locale-picker"><b>Язык редактирования текстов</b><div className="chips">{(['ru','ky','en'] as const).map(l=><button type="button" key={l} className={editLocale===l?'selected':''} onClick={()=>setEditLocale(l)}>{l.toUpperCase()}</button>)}</div><small>RU — основной текст; KG и EN — независимые переводы. Незаполненные поля показывают русский вариант.</small></div>{([['heroTitle','Первый заголовок'],['heroEmphasis','Выделенный заголовок'],['heroSubtitle','Описание на главной'],['heroImage','Фото первого экрана (URL)'],['aboutTitle','Заголовок «О нас»'],['aboutText','Описание салона'],['academyTitle','Заголовок обучения'],['academyText','Текст обучения'],['academyImage','Фото обучения (URL)']] as const).map(([k,label])=><label className="field" key={k}>{label}{k.toLowerCase().includes('text')||k.toLowerCase().includes('subtitle')?<textarea rows={3} value={editLocale==='ru'?content[k]:(content.localized?.[editLocale]?.[k]||'')} onChange={e=>editLocale==='ru'?change('content',{...content,[k]:e.target.value}):change('content',{...content,localized:{...content.localized,[editLocale]:{...(content.localized?.[editLocale]||{}),[k]:e.target.value}}})}/>:k.toLowerCase().includes('image')?<ImageUpload library={mediaGallery} uploadImage={uploadImage} uploading={uploading} label={label} value={content[k]} onChange={v=>change('content',{...content,[k]:v})}/>:<input value={editLocale==='ru'?content[k]:(content.localized?.[editLocale]?.[k]||'')} onChange={e=>editLocale==='ru'?change('content',{...content,[k]:e.target.value}):change('content',{...content,localized:{...content.localized,[editLocale]:{...(content.localized?.[editLocale]||{}),[k]:e.target.value}}})}/>}</label>)}<div className="admin-gallery-editor"><h4>{t("Фотографии галереи")}</h4><p className="hint">{t("Загрузите новые фотографии или удалите старые. Публичная галерея обновится после сохранения настроек.")}</p><label className="field">{t("Добавить фотографии с устройства")}<input type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/avif" multiple disabled={uploading} onChange={async e=>{const files=Array.from(e.target.files||[]);for(const f of files){await uploadImage(f,url=>setState(prev=>({...prev,content:{...prev.content,galleryImages:[...(prev.content.galleryImages??gallery),url]}})))}e.target.value=''}}/></label><div className="admin-gallery-grid">{mediaGallery.map((url,i)=><div className="admin-gallery-thumb" key={url+i}><MediaImage src={url} alt={`Фото галереи ${i+1}`}/><button type="button" onClick={()=>change('content',{...state.content,galleryImages:mediaGallery.filter((_,j)=>j!==i)})}>{t("Убрать")} <X size={13}/></button></div>)}</div></div><button className="btn btn-primary" onClick={saveContent}>{t("Сохранить изменения")} <Save size={17}/></button></div></div>:null}
+  {adminPage==='Настройки'?<div className="admin-panel"><h3>{t("Настройки сайта")}</h3><div className="admin-fields"><div className="admin-locale-picker"><b>Язык адреса и графика</b><div className="chips">{(['ru','ky','en'] as const).map(l=><button type="button" key={l} className={editLocale===l?'selected':''} onClick={()=>setEditLocale(l)}>{l.toUpperCase()}</button>)}</div></div><label className="field">{t("WhatsApp (международный номер, только цифры)")}<input value={content.whatsapp} placeholder="996..." onChange={e=>change('content',{...content,whatsapp:e.target.value})}/></label><div className="telegram-admin-setting"><h4>Telegram владельца (без бота)</h4><p className="hint">Укажите публичный @username или ссылку https://t.me/username. Номер телефона не обеспечивает автоматическую отправку. В разделе «Записи» кнопка Telegram копирует заявку и открывает этот чат; отправить сообщение нужно вручную.</p><label className="field">Telegram @username или ссылка<input value={content.telegramOwner||''} placeholder="@username или https://t.me/username" onChange={e=>change('content',{...content,telegramOwner:e.target.value})}/></label><div className="telegram-settings-actions"><button type="button" className="btn btn-outline" onClick={()=>change('content',{...content,telegramOwner:''})}>Удалить Telegram</button>{telegramOwnerLink()?<a className="btn btn-outline" href={telegramOwnerLink()||'#'} target="_blank" rel="noopener noreferrer">Проверить ссылку ↗</a>:<span className="hint">Пока нет корректного адреса Telegram</span>}</div><p className="hint">После изменения нажмите «Сохранить настройки» ниже.</p></div><label className="field">{t("Адрес салона")}<input value={editLocale==='ru'?(content.address||''):(content.localized?.[editLocale]?.address||'')} onChange={e=>editLocale==='ru'?change('content',{...content,address:e.target.value}):change('content',{...content,localized:{...content.localized,[editLocale]:{...(content.localized?.[editLocale]||{}),address:e.target.value}}})}/></label><label className="field">{t("Ссылка на карту (Google Maps, 2GIS и др.)")}<input type="url" value={content.addressMapUrl||''} placeholder="https://maps.google.com/..." onChange={e=>change('content',{...content,addressMapUrl:e.target.value})}/></label>{content.addressMapUrl&&!salonMapLink()&&<p className="error">Укажите полную ссылку http:// или https://</p>}<label className="field">{t("График работы салона")}<input value={editLocale==='ru'?(content.openingHours||''):(content.localized?.[editLocale]?.openingHours||'')} onChange={e=>editLocale==='ru'?change('content',{...content,openingHours:e.target.value}):change('content',{...content,localized:{...content.localized,[editLocale]:{...(content.localized?.[editLocale]||{}),openingHours:e.target.value}}})}/></label><label className="field">{t("Ссылка на аудиофайл HTTPS")}<input value={content.musicUrl} placeholder="https://...mp3" onChange={e=>change('content',{...content,musicUrl:e.target.value,musicEnabled:Boolean(e.target.value.trim())})}/></label><label className="field">{t("Или загрузите музыку с устройства (MP3, WAV, OGG, M4A)")}<input type="file" accept="audio/mpeg,audio/mp3,audio/wav,audio/ogg,audio/mp4,audio/x-m4a,.mp3,.wav,.ogg,.m4a" disabled={uploading} onChange={e=>{const file=e.target.files?.[0];if(file)void uploadAudio(file,url=>setState(prev=>({...prev,content:{...prev.content,musicUrl:url,musicEnabled:true}})));e.target.value=''}}/></label><label className="field music-volume-control"><span>Громкость музыки на сайте: <strong>{musicVolume}%</strong></span><input type="range" min="0" max="100" step="5" value={musicVolume} onChange={e=>change('content',{...content,musicVolume:Number(e.target.value)})} aria-label="Громкость музыки на сайте"/><small>Настройка сохраняется вместе с музыкой и применяется ко всем посетителям. Начальная громкость — 30%.</small></label><label className="switch-row"><input type="checkbox" checked={content.musicEnabled} onChange={e=>change('content',{...content,musicEnabled:e.target.checked})}/>  {t("Музыка включена для посетителей")}</label><label className="switch-row"><input type="checkbox" checked={content.shopEnabled} onChange={e=>change('content',{...content,shopEnabled:e.target.checked})}/>  {t("Магазин доступен посетителям")}</label><button className="btn btn-primary" onClick={saveContent}>{t("Сохранить настройки")} <Save size={17}/></button>{!configured&&<p className="hint">Защищённый вход и смена пароля требуют настройки Firebase.</p>}{configured&&<div className="password-box"><h4>Изменить пароль администратора</h4><label className="field">Текущий пароль<input type="password" autoComplete="current-password" value={currentAdminPassword} onChange={e=>setCurrentAdminPassword(e.target.value)}/></label><label className="field">Новый пароль (от 12 символов)<input type="password" autoComplete="new-password" value={newAdminPassword} onChange={e=>setNewAdminPassword(e.target.value)}/></label><button className="btn btn-outline" onClick={changeAdminPassword}>Изменить пароль</button></div>}</div></div>:null}
+    </div>{categoryEdit&&<div className="modal-backdrop"><div className="modal edit-modal"><button className="modal-close" onClick={()=>setCategoryEdit(null)}><X/></button><h2>Категория</h2><div className="admin-locale-picker"><b>Язык названия</b><div className="chips">{(['ru','ky','en'] as const).map(l=><button type="button" key={l} className={editLocale===l?'selected':''} onClick={()=>setEditLocale(l)}>{l.toUpperCase()}</button>)}</div></div><label className="field">Название<input value={editLocale==='ru'?categoryEdit.name:categoryEdit.localized?.[editLocale]?.name||''} onChange={e=>setCategoryEdit(v=>v&&(editLocale==='ru'?{...v,name:e.target.value}:{...v,localized:{...v.localized,[editLocale]:{...v.localized?.[editLocale],name:e.target.value}}}))}/></label><label className="field">Раздел<select value={categoryEdit.kind} onChange={e=>setCategoryEdit(v=>v&&({...v,kind:e.target.value as 'service'|'product'}))}><option value="service">Услуги</option><option value="product">Магазин</option></select></label><ImageUpload library={mediaGallery} uploadImage={uploadImage} uploading={uploading} label="Обложка категории" value={categoryEdit.image} onChange={image=>setCategoryEdit(v=>v&&({...v,image}))}/><label className="field">Порядок<input type="number" value={categoryEdit.sortOrder} onChange={e=>setCategoryEdit(v=>v&&({...v,sortOrder:Number(e.target.value)}))}/></label><label className="switch-row"><input type="checkbox" checked={categoryEdit.active} onChange={e=>setCategoryEdit(v=>v&&({...v,active:e.target.checked}))}/>Опубликована</label><button className="btn btn-primary" onClick={()=>void categorySave()}>Сохранить категорию</button></div></div>}{edit&&editTable&&<div className="modal-backdrop"><div className="modal edit-modal"><button className="modal-close" onClick={()=>setEdit(null)}><X/></button><h2>{edit.name?'Редактировать':'Новая запись'}</h2><div className="admin-fields"><div className="admin-locale-picker"><b>Язык описаний</b><div className="chips">{(['ru','ky','en'] as const).map(l=><button type="button" key={l} className={editLocale===l?'selected':''} onClick={()=>setEditLocale(l)}>{l.toUpperCase()}</button>)}</div><small>Переводятся название, описание и специализация. Остальные поля общие.</small></div>{(editTable==='reviews'?[['name','Автор'],['text','Текст'],['rating','Рейтинг от 1 до 5'],['image','Ссылка на фото']]:editTable==='masters'?[['name','Имя'],['specialty','Специализация'],['image','Фото (URL)'],['serviceIds','ID услуг через запятую']]:[['name','Название'],['category','Категория'],['description','Описание'],['image','Фото (URL)'],['price','Цена'],...(editTable==='services'?[['duration','Длительность в минутах']]:[])]).map(([k,label])=><label className="field" key={k}>{label}{k==='category'?<select value={edit[k]||''} onChange={e=>setEdit(v=>({...v,category:e.target.value}))}><option value="">Выберите категорию</option>{state.categories.filter(c=>c.kind===(editTable==='products'?'product':'service')&&c.active).map(c=><option key={c.id} value={c.name}>{c.name}</option>)}{edit[k]&&!state.categories.some(c=>c.name===edit[k])?<option value={edit[k]}>{edit[k]}</option>:null}</select>:k==='image'?<ImageUpload library={mediaGallery} uploadImage={uploadImage} uploading={uploading} label="Фотография" value={String(edit[k]||'')} onChange={url=>setEdit(v=>({...v,image:url}))}/>:<input value={editLocale!=='ru'&&['name','description','specialty','text'].includes(k)?String(edit.localized?.[editLocale]?.[k]??''):Array.isArray(edit[k])?edit[k].join(', '):String(edit[k]??'')} onChange={e=>setEdit(v=>v?(editLocale!=='ru'&&['name','description','specialty','text'].includes(k)?({...v,localized:{...v.localized,[editLocale]:{...v.localized?.[editLocale],[k]:e.target.value}}}):({...v,[k]:k==='price'||k==='duration'||k==='rating'?Number(e.target.value):k==='serviceIds'?e.target.value.split(',').map(x=>x.trim()).filter(Boolean):e.target.value})):null)}/>}</label>)}<label className="switch-row"><input type="checkbox" checked={editTable==='reviews'?edit.approved===true:edit.active!==false} onChange={e=>setEdit(v=>editTable==='reviews'?({...v,approved:e.target.checked}):({...v,active:e.target.checked}))}/>  {t("Опубликовано")}</label><button className="btn btn-primary" disabled={saving} onClick={saveEdit}>{saving?'Сохранение…':'Сохранить'}</button></div></div></div>}</div>;
+--- a/src/firebase.ts
++++ b/src/firebase.ts
+@@ -2,8 +2,6 @@
+ import {getApps, initializeApp, type FirebaseApp} from 'firebase/app';
+ import {getAuth, type Auth} from 'firebase/auth';
+ import {getFirestore, type Firestore} from 'firebase/firestore';
+-import {getFunctions, type Functions} from 'firebase/functions';
+-import {getStorage, type FirebaseStorage} from 'firebase/storage';
+ import {initializeAppCheck,ReCaptchaV3Provider} from 'firebase/app-check';
+ 
+ const config = {
+@@ -17,10 +15,8 @@
+ export const app: FirebaseApp | null = configured ? (getApps()[0] || initializeApp(config)) : null;
+ export const auth: Auth | null = app ? getAuth(app) : null;
+ export const db: Firestore | null = app ? getFirestore(app) : null;
+-export const storage: FirebaseStorage | null = app ? getStorage(app) : null;
+-export const functions: Functions | null = app ? getFunctions(app, import.meta.env.VITE_FIREBASE_FUNCTIONS_REGION || 'europe-west1') : null;
+ 
+-// Optional production hardening: register a reCAPTCHA v3 site key and enforce App Check for callable functions.
++// Optional production hardening: register a reCAPTCHA v3 site key for Firestore App Check.
+ if(app && typeof window!=='undefined' && import.meta.env.VITE_FIREBASE_APPCHECK_SITE_KEY){
+   initializeAppCheck(app,{provider:new ReCaptchaV3Provider(import.meta.env.VITE_FIREBASE_APPCHECK_SITE_KEY),isTokenAutoRefreshEnabled:true});
+ }
+--- a/src/store.ts
++++ b/src/store.ts
+@@ -1,12 +1,15 @@
+-/** Firestore/Functions data access boundary: UI never writes guest orders or bookings directly. */
+-import {collection, deleteDoc, doc, getDoc, getDocs, onSnapshot, query, where, setDoc, type Unsubscribe} from 'firebase/firestore';
+-import {httpsCallable} from 'firebase/functions';
++/** EL BEM: Spark-only Firestore backend. No Cloud Functions or Firebase Storage required.
++ * Reservations use atomic multi-document Firestore transactions and deterministic
++ * 30-minute occupancy documents. The security rules must be deployed together.
++ */
++import {
++  collection, deleteDoc, doc, getDoc, getDocs, onSnapshot, query, where,
++  setDoc, runTransaction, type Unsubscribe
++} from 'firebase/firestore';
+ import {getIdTokenResult} from 'firebase/auth';
+-import {ref, uploadBytes, getDownloadURL} from 'firebase/storage';
+-import {auth, db, functions, storage, configured} from './firebase';
++import {auth, db, configured} from './firebase';
+ import {defaults,services,masters,products,type Content,type Service,type Master,type Product,type Booking} from './data';
+-export {configured};
+-export {auth};
++export {configured, auth};
+ export type CatalogCategory={localized?:import('./data').LocalizedFields;id:string;name:string;kind:'service'|'product';image:string;active:boolean;sortOrder:number};
+ export type Order={id:string;name:string;phone:string;items:{id:string;quantity:number;price:number;name?:string}[];total:number;date:string;status?:string;userId?:string};
+ export type Review={id:string;text:string;name:string;image?:string;rating?:number;approved?:boolean};
+@@ -20,16 +23,24 @@
+   products:Array.isArray(d.products)?d.products.map((item:Product)=>({...item,description:item.description==='Демонстрационная позиция'?'Средство для ежедневного ухода.':item.description})):start.products,
+   reviews:Array.isArray(d.reviews)?d.reviews.filter((item:Review)=>!(item.id==='r1'&&item.text?.includes('демонстрационный'))):start.reviews
+  }}catch{}return start}
+-export function writeDemo(state:State){try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){console.warn('Local demo storage full',e)}}
+-function requireDb(){if(!db)throw Error('Firebase не настроен');return db}
++export function writeDemo(state:State){try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){console.warn('Local data storage full',e)}}
++function requireDb(){if(!db)throw Error('Firebase ещё не настроен');return db}
++function requireUser(){const u=auth?.currentUser;if(!u)throw Error('Войдите или зарегистрируйтесь, чтобы отправить заявку.');return u}
++function clean(s:string,max=120){return String(s||'').replace(/[<>]/g,'').trim().slice(0,max)}
++function validPhone(s:string){return /^\+?\d[\d\s()\-]{7,}$/.test(s.trim())}
++function dateLocal(){return new Date(Date.now()+6*3600000).toISOString().slice(0,16)}
++const timeMinutes=(s:string)=>Number(s.slice(0,2))*60+Number(s.slice(3,5));
++const minutesTime=(n:number)=>`${String(Math.floor(n/60)).padStart(2,'0')}:${String(n%60).padStart(2,'0')}`;
++const slotKey=(masterId:string,date:string,minute:number)=>`${masterId}|${date}|${minute}`;
+ function mapCollection(key:string):string{const mapping:Record<string,string>={site_content:'siteContent',catalog_categories:'categories',blocked_slots:'blockedSlots',master_hours:'masterHours'};return mapping[key]||key}
+ async function docs<T>(name:string):Promise<T[]>{const records=await getDocs(collection(requireDb(),mapCollection(name)));return records.docs.map(row=>({id:row.id,...row.data()} as T))}
+ export async function readLive(includePrivate=false):Promise<State>{
+   const [ss,ms,ps,cs,rs,content]=await Promise.all([
+-    docs<Service>('services'),docs<Master>('masters'),docs<Product>('products'),docs<CatalogCategory>('categories'),includePrivate?docs<Review>('reviews'):getDocs(query(collection(requireDb(),'reviews'),where('approved','==',true))).then(ss=>ss.docs.map(d=>({id:d.id,...d.data()} as Review))),
++    docs<Service>('services'),docs<Master>('masters'),docs<Product>('products'),docs<CatalogCategory>('categories'),
++    includePrivate?docs<Review>('reviews'):getDocs(query(collection(requireDb(),'reviews'),where('approved','==',true))).then(ss=>ss.docs.map(d=>({id:d.id,...d.data()} as Review))),
+     getDoc(doc(requireDb(),'siteContent','main')),
+   ]);
+-  if(!includePrivate)return {content:content.exists()?content.data() as Content:defaults,categories:cs,services:ss,masters:ms,products:ps,reviews:rs.filter(r=>r.approved!==false),bookings:[],orders:[],blocked:[]};
++  if(!includePrivate)return {content:content.exists()?content.data() as Content:defaults,categories:cs,services:ss,masters:ms,products:ps,reviews:rs.filter(r=>r.approved===true),bookings:[],orders:[],blocked:[]};
+   const [bookings,orders,blocks]=await Promise.all([docs<Booking>('bookings'),docs<Order>('orders'),docs<{slot:string}>('blockedSlots')]);
+   return {content:content.exists()?content.data() as Content:defaults,categories:cs,services:ss,masters:ms,products:ps,reviews:rs,bookings,orders,blocked:blocks.map(b=>b.slot)};
+ }
+@@ -46,14 +57,133 @@
+ export async function getMasterHours():Promise<MasterHour[]>{return docs<MasterHour>('masterHours')}
+ export async function saveMasterHour(row:MasterHour){await saveEntity('master_hours',row)}
+ export async function deleteBlock(slot:string){await deleteEntity('blocked_slots',slot)}
+-export async function createBooking(b:Booking):Promise<{id:string;masterId:string;total:number}>{if(!functions)throw Error('Cloud Functions не настроены');const call=httpsCallable<Partial<Booking>,{id:string;masterId:string;total:number}>(functions,'createBooking');const response=await call(b);return response.data}
+-export async function availableSlots(date:string,serviceIds:string[],masterId:string):Promise<string[]>{if(!functions)return [];const call=httpsCallable<{date:string;serviceIds:string[];masterId:string},{slots:string[]}>(functions,'availableSlots');return (await call({date,serviceIds,masterId})).data.slots}
+-export async function updateBookingStatus(id:string,status:Booking['status']){if(!functions)throw Error('Cloud Functions не настроены');const call=httpsCallable<{id:string;status:string},{ok:boolean}>(functions,'updateBookingStatus');await call({id,status})}
+-export async function makeOrder(order:Order):Promise<Order>{if(!functions)throw Error('Cloud Functions не настроены');const call=httpsCallable<{name:string;phone:string;items:Order['items']},{order:Order}>(functions,'placeOrder');return (await call({name:order.name,phone:order.phone,items:order.items})).data.order}
++
++const STEP=30;
++const MAX_LOCKS=8;  // Up to four hours per appointment on the free plan.
++function checkDate(date:string){
++  if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||new Date(`${date}T00:00:00Z`).toISOString().slice(0,10)!==date)throw Error('Некорректная дата');
++  const diff=(Date.parse(date+'T00:00:00Z')-Date.parse(dateLocal().slice(0,10)+'T00:00:00Z'))/86400000;
++  if(diff<0||diff>90)throw Error('Можно записаться только на ближайшие 90 дней');
++}
++async function bookingContext(date:string,serviceIds:string[],masterId:string){
++  checkDate(date);
++  if(!Array.isArray(serviceIds)||serviceIds.length<1||serviceIds.length>8||new Set(serviceIds).size!==serviceIds.length)throw Error('Выберите услуги');
++  const [selected,allMasters,hours,blocked,locks]=await Promise.all([
++    Promise.all(serviceIds.map(id=>getDoc(doc(requireDb(),'services',id)))),
++    docs<Master>('masters'),docs<MasterHour>('masterHours'),docs<{slot:string}>('blockedSlots'),
++    getDocs(query(collection(requireDb(),'reservationLocks'),where('date','==',date)))
++  ]);
++  if(selected.some(s=>!s.exists()||s.data()?.active===false))throw Error('Одна из услуг недоступна');
++  const chosen=selected.map(s=>s.data() as Service);
++  const rawDuration=chosen.reduce((n,s)=>n+Number(s.duration),0);
++  const price=chosen.reduce((n,s)=>n+Number(s.price),0);
++  if(!chosen.every(s=>Number.isFinite(s.price)&&s.price>=0&&Number.isFinite(s.duration)&&s.duration>=15)||!Number.isFinite(rawDuration))throw Error('Недопустимая цена или длительность услуги');
++  if(Math.ceil(rawDuration/STEP)>MAX_LOCKS)throw Error('На сайте можно выбрать процедуры общей длительностью до 4 часов. Для более долгой записи свяжитесь с салоном.');
++  const duration=Math.ceil(rawDuration/STEP)*STEP;
++  const weekday=new Date(date+'T00:00:00Z').getUTCDay();
++  const candidates=allMasters.filter(m=>m.active!==false&&serviceIds.every(id=>m.serviceIds?.includes(id))&&(masterId==='any'||m.id===masterId))
++    .map(master=>({...master,working:hours.find(h=>h.master_id===master.id&&h.weekday===weekday)||{open_at:'09:00',close_at:'19:00',is_open:true}}))
++    .filter(m=>m.working.is_open);
++  return {chosen,candidates,duration,rawDuration,price,blocked:new Set(blocked.map(b=>b.slot)),locked:new Set(locks.docs.map(l=>l.id))};
++}
++function spansAreOpen(date:string,startMinute:number,ctx:Awaited<ReturnType<typeof bookingContext>>,master:typeof ctx.candidates[number]){
++  if(startMinute<timeMinutes(master.working.open_at)||startMinute+ctx.duration>timeMinutes(master.working.close_at))return false;
++  for(let minute=startMinute;minute<startMinute+ctx.duration;minute+=STEP){
++    const time=minutesTime(minute);
++    if(ctx.blocked.has(`${date}|${time}`)||ctx.blocked.has(`${master.id}|${date}|${time}`)||ctx.locked.has(slotKey(master.id,date,minute)))return false;
++  }
++  return true;
++}
++export async function availableSlots(date:string,serviceIds:string[],masterId:string):Promise<string[]>{
++  if(!serviceIds.length)return [];
++  const ctx=await bookingContext(date,serviceIds,masterId);
++  const slots:string[]=[];
++  for(let m=9*60;m<21*60;m+=STEP){
++    const time=minutesTime(m);
++    if(`${date}T${time}`<=dateLocal())continue;
++    if(ctx.candidates.some(master=>spansAreOpen(date,m,ctx,master)))slots.push(time);
++  }
++  return slots;
++}
++class SlotBusy extends Error{}
++export async function createBooking(input:Booking):Promise<{id:string;masterId:string;total:number}>{
++  const user=requireUser();
++  if(clean(input.name,100).length<2||!validPhone(input.phone))throw Error('Укажите имя и телефон');
++  if(!/^(?:[01]\d|2[0-3]):(?:00|30)$/.test(input.time))throw Error('Выберите время из списка');
++  const ctx=await bookingContext(input.date,input.serviceIds,input.masterId);
++  const minute=timeMinutes(input.time);
++  if(`${input.date}T${input.time}`<=dateLocal())throw Error('Это время уже прошло');
++  if(ctx.candidates.length===0)throw Error('Нет доступного мастера для выбранных услуг');
++  for(const master of ctx.candidates){
++    if(!spansAreOpen(input.date,minute,ctx,master))continue;
++    const bookingRef=doc(collection(requireDb(),'bookings'));
++    const lockKeys=Array.from({length:ctx.duration/STEP},(_,i)=>slotKey(master.id,input.date,minute+i*STEP));
++    const refs=lockKeys.map(key=>doc(requireDb(),'reservationLocks',key));
++    const payload={id:bookingRef.id,name:clean(input.name,100),phone:clean(input.phone,35),date:input.date,time:input.time,
++      startMinute:minute,lockKeys,serviceIds:input.serviceIds,serviceNames:ctx.chosen.map(s=>clean(s.name,200)),
++      masterId:master.id,masterName:clean(master.name,120),total:ctx.price,duration:ctx.rawDuration,status:'pending',
++      createdAt:new Date().toISOString(),note:clean(input.note||'',1000),userId:user.uid};
++    try{
++      await runTransaction(requireDb(),async tx=>{
++        const snapshots=[];
++        for(const ref of refs)snapshots.push(await tx.get(ref));
++        if(snapshots.some(s=>s.exists()))throw new SlotBusy('Интервал занят');
++        tx.set(bookingRef,payload);
++        refs.forEach((ref,i)=>tx.set(ref,{bookingId:bookingRef.id,userId:user.uid,masterId:master.id,date:input.date,minute:minute+i*STEP}));
++      });
++      return {id:bookingRef.id,masterId:master.id,total:ctx.price};
++    }catch(e){if(e instanceof SlotBusy)continue;throw e}
++  }
++  throw Error('Выбранное время уже занято. Обновите список доступных интервалов.');
++}
++export async function updateBookingStatus(id:string,status:Booking['status']){
++  if(!await checkAdmin())throw Error('Требуется роль администратора');
++  if(!['confirmed','cancelled'].includes(status))throw Error('Неизвестный статус');
++  const ref=doc(requireDb(),'bookings',id);
++  await runTransaction(requireDb(),async tx=>{
++    const snap=await tx.get(ref);
++    if(!snap.exists())throw Error('Запись не найдена');
++    const booking=snap.data() as Booking & {lockKeys?:string[]};
++    if(booking.status==='cancelled'&&status!=='cancelled')throw Error('Отменённую запись нельзя подтвердить повторно');
++    const refs=status==='cancelled'&&booking.status!=='cancelled'?(booking.lockKeys||[]).map(key=>doc(requireDb(),'reservationLocks',key)):[];
++    const locks=[];
++    for(const r of refs)locks.push(await tx.get(r));
++    locks.forEach((lock,i)=>{if(lock.exists()&&lock.data()?.bookingId===id)tx.delete(refs[i])});
++    tx.update(ref,{status});
++  });
++}
++export async function makeOrder(order:Order):Promise<Order>{
++  const user=requireUser();
++  if(clean(order.name,100).length<2||!validPhone(order.phone)||!order.items.length||order.items.length>8)throw Error('Проверьте контактные данные и корзину (максимум 8 разных товаров)');
++  const ids=order.items.map(i=>i.id);
++  if(new Set(ids).size!==ids.length||order.items.some(x=>!Number.isInteger(x.quantity)||x.quantity<1||x.quantity>20))throw Error('Некорректное количество товаров');
++  const pDocs=await Promise.all(ids.map(id=>getDoc(doc(requireDb(),'products',id))));
++  if(pDocs.some(s=>!s.exists()||s.data()?.active===false))throw Error('Один из товаров больше не продаётся');
++  const items=order.items.map((x,i)=>({id:x.id,quantity:x.quantity,price:Number(pDocs[i].data()!.price),name:clean(String(pDocs[i].data()!.name),200)}));
++  if(items.some(i=>!Number.isFinite(i.price)||i.price<0))throw Error('Некорректная цена');
++  const output:Order={id:crypto.randomUUID(),name:clean(order.name,100),phone:clean(order.phone,35),items,
++    total:items.reduce((sum,i)=>sum+i.quantity*i.price,0),date:new Date().toISOString(),status:'pending',userId:user.uid};
++  await setDoc(doc(requireDb(),'orders',output.id),output);
++  return output;
++}
++export async function updateOrderStatus(id:string,status:string){
++  if(!await checkAdmin())throw Error('Требуется роль администратора');
++  if(!['pending','processing','completed','cancelled'].includes(status))throw Error('Недопустимый статус');
++  await setDoc(doc(requireDb(),'orders',id),{status},{merge:true});
++}
++export async function submitReview(name:string,review:string,rating:number){
++  const user=requireUser();
++  if(clean(name,90).length<2||clean(review,1800).length<12||!Number.isInteger(rating)||rating<1||rating>5)throw Error('Укажите имя, отзыв и оценку');
++  const id='user_'+user.uid;
++  // Create-only: prevent repeatedly replacing reviews or self-approving.
++  await runTransaction(requireDb(),async tx=>{
++    const r=doc(requireDb(),'reviews',id);
++    if((await tx.get(r)).exists())throw Error('Вы уже оставляли отзыв');
++    tx.set(r,{id,name:clean(name,90),text:clean(review,1800),rating,approved:false,userId:user.uid,createdAt:new Date().toISOString()});
++  });
++}
+ export async function checkAdmin(){const u=auth?.currentUser;if(!u)return false;const token=await getIdTokenResult(u,true);return token.claims.admin===true}
+ export async function getMyData():Promise<{bookings:Booking[];orders:Order[]}>{const user=auth?.currentUser;if(!user)return {bookings:[],orders:[]};const [bs,os]=await Promise.all([getDocs(query(collection(requireDb(),'bookings'),where('userId','==',user.uid))),getDocs(query(collection(requireDb(),'orders'),where('userId','==',user.uid)))]);return {bookings:bs.docs.map(x=>({id:x.id,...x.data()} as Booking)),orders:os.docs.map(x=>({id:x.id,...x.data()} as Order))}}
+-export function subscribeAdminBookings(onChange:(bookings:Booking[])=>void):Unsubscribe{ return onSnapshot(collection(requireDb(),'bookings'),ss=>onChange(ss.docs.map(row=>({id:row.id,...row.data()} as Booking))),e=>console.error('Booking subscription',e))}
+-export async function uploadMedia(file:File,folder:'site'|'audio'):Promise<string>{if(!storage||!auth?.currentUser)throw Error('Требуется вход администратора');const safe=file.name.replace(/[^a-zA-Z0-9._-]/g,'_');const id=crypto.randomUUID();const obj=ref(storage,`${folder}/${id}-${safe}`);await uploadBytes(obj,file,{contentType:file.type});return getDownloadURL(obj)}
+-
+-export async function submitReview(name:string,review:string,rating:number){if(!functions)throw Error('Firebase не настроен');const call=httpsCallable<{name:string;review:string;rating:number},{ok:boolean}>(functions,'submitReview');await call({name,review,rating})}
+-export async function updateOrderStatus(id:string,status:string){if(!functions)throw Error('Firebase не настроен');const call=httpsCallable<{id:string;status:string},{ok:boolean}>(functions,'updateOrderStatus');await call({id,status})}
++export function subscribeAdminBookings(onChange:(bookings:Booking[])=>void):Unsubscribe{return onSnapshot(collection(requireDb(),'bookings'),ss=>onChange(ss.docs.map(row=>({id:row.id,...row.data()} as Booking))),e=>console.error('Booking subscription',e))}
++export function subscribeAdminOrders(onChange:(orders:Order[])=>void):Unsubscribe{return onSnapshot(collection(requireDb(),'orders'),ss=>onChange(ss.docs.map(row=>({id:row.id,...row.data()} as Order))),e=>console.error('Order subscription',e))}
++export async function uploadMedia(_file:File,_folder:'site'|'audio'):Promise<string>{throw Error('На бесплатном тарифе Spark новые файлы не загружаются. Используйте публичную ссылку HTTPS или файл из папки public.');}

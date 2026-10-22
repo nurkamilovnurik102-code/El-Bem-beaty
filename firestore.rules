@@ -1,0 +1,147 @@
+rules_version = '2';
+// Spark-only. Publish these rules before using the Spark data adapter.
+// Admin privileges come ONLY from Firebase Auth custom claims, never from browser variables.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function loggedIn() { return request.auth != null; }
+    function admin() { return loggedIn() && request.auth.token.admin == true; }
+    function own() { return loggedIn() && resource.data.userId == request.auth.uid; }
+    function bookingAfter(id) { return getAfter(/databases/$(database)/documents/bookings/$(id)).data; }
+    function lockAfter(key) { return getAfter(/databases/$(database)/documents/reservationLocks/$(key)).data; }
+    function validBookingSlot(i) {
+      let b = request.resource.data;
+      let key = b.lockKeys[i];
+      let l = lockAfter(key);
+      return key == b.masterId + '|' + b.date + '|' + string(b.startMinute + i * 30)
+        && l.bookingId == b.id && l.userId == request.auth.uid
+        && l.masterId == b.masterId && l.date == b.date
+        && l.minute == b.startMinute + i * 30;
+    }
+    function allBookingSlots() {
+      let n = request.resource.data.lockKeys.size();
+      return validBookingSlot(0)
+        && (n < 2 || validBookingSlot(1))
+        && (n < 3 || validBookingSlot(2))
+        && (n < 4 || validBookingSlot(3))
+        && (n < 5 || validBookingSlot(4))
+        && (n < 6 || validBookingSlot(5))
+        && (n < 7 || validBookingSlot(6))
+        && (n < 8 || validBookingSlot(7));
+    }
+    function validBooking(id) {
+      let b = request.resource.data;
+      return loggedIn()
+        && b.keys().hasOnly(['id','name','phone','date','time','startMinute','lockKeys','serviceIds','serviceNames','masterId','masterName','total','duration','status','createdAt','note','userId'])
+        && b.id == id && b.userId == request.auth.uid
+        && b.status == 'pending'
+        && b.name is string && b.name.size() >= 2 && b.name.size() <= 100
+        && b.phone is string && b.phone.size() >= 8 && b.phone.size() <= 35
+        && b.note is string && b.note.size() <= 1000
+        && b.date is string && b.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && b.time is string && b.time.matches('^([01][0-9]|2[0-3]):(00|30)$')
+        && b.masterId is string && b.masterId.matches('^[A-Za-z0-9_-]{1,90}$')
+        && b.serviceIds is list && b.serviceIds.size() >= 1 && b.serviceIds.size() <= 8
+        && b.serviceNames is list && b.serviceNames.size() == b.serviceIds.size()
+        && b.startMinute is int && b.startMinute >= 540 && b.startMinute <= 1170 && b.startMinute % 30 == 0
+        && b.duration is number && b.duration >= 15 && b.duration <= 240
+        && b.total is number && b.total >= 0 && b.total <= 10000000
+        && b.lockKeys is list && b.lockKeys.size() >= 1 && b.lockKeys.size() <= 8
+        && b.lockKeys.size() * 30 >= b.duration && (b.lockKeys.size() - 1) * 30 < b.duration
+        && b.createdAt is string && b.createdAt.size() <= 40
+        && allBookingSlots();
+    }
+    function itemValid(items,i) {
+      let v = items[i];
+      let p = get(/databases/$(database)/documents/products/$(v.id)).data;
+      return v is map && v.keys().hasOnly(['id','quantity','price','name'])
+        && v.id is string && v.quantity is int && v.quantity >= 1 && v.quantity <= 20
+        && v.price is number && v.price >= 0 && v.price == p.price
+        && v.name is string && v.name == p.name
+        && (!('active' in p) || p.active == true);
+    }
+    function itemsValid(items) {
+      let n = items.size();
+      return itemValid(items,0)
+        && (n < 2 || itemValid(items,1))
+        && (n < 3 || itemValid(items,2))
+        && (n < 4 || itemValid(items,3))
+        && (n < 5 || itemValid(items,4))
+        && (n < 6 || itemValid(items,5))
+        && (n < 7 || itemValid(items,6))
+        && (n < 8 || itemValid(items,7));
+    }
+    function lineTotal(items,i){ return items.size() <= i ? 0 : items[i].price * items[i].quantity; }
+    function validOrder(id){
+      let o = request.resource.data;
+      return loggedIn() && o.keys().hasOnly(['id','name','phone','items','total','date','status','userId'])
+        && o.id == id && o.userId == request.auth.uid && o.status == 'pending'
+        && o.name is string && o.name.size() >= 2 && o.name.size() <= 100
+        && o.phone is string && o.phone.size() >= 8 && o.phone.size() <= 35
+        && o.date is string && o.date.size() <= 40
+        && o.items is list && o.items.size() >= 1 && o.items.size() <= 8
+        && itemsValid(o.items)
+        && o.total == lineTotal(o.items,0)+lineTotal(o.items,1)+lineTotal(o.items,2)+lineTotal(o.items,3)
+          +lineTotal(o.items,4)+lineTotal(o.items,5)+lineTotal(o.items,6)+lineTotal(o.items,7);
+    }
+
+    match /siteContent/{id} { allow read: if true; allow write: if admin(); }
+    match /services/{id} { allow read: if true; allow write: if admin(); }
+    match /masters/{id} { allow read: if true; allow write: if admin(); }
+    match /products/{id} { allow read: if true; allow write: if admin(); }
+    match /categories/{id} { allow read: if true; allow write: if admin(); }
+    match /masterHours/{id} { allow read: if true; allow write: if admin(); }
+    match /blockedSlots/{id} { allow read: if true; allow write: if admin(); }
+    match /reviews/{id} {
+      allow get, list: if admin() || resource.data.approved == true;
+      allow create: if loggedIn() && id == 'user_' + request.auth.uid
+        && request.resource.data.keys().hasOnly(['id','name','text','rating','approved','userId','createdAt'])
+        && request.resource.data.id == id && request.resource.data.userId == request.auth.uid
+        && request.resource.data.approved == false
+        && request.resource.data.name is string && request.resource.data.name.size() >= 2 && request.resource.data.name.size() <= 90
+        && request.resource.data.text is string && request.resource.data.text.size() >= 12 && request.resource.data.text.size() <= 1800
+        && request.resource.data.rating is int && request.resource.data.rating >= 1 && request.resource.data.rating <= 5;
+      allow update, delete: if admin();
+    }
+    match /bookings/{bookingId} {
+      allow get, list: if admin() || own();
+      allow create: if validBooking(bookingId);
+      allow update: if admin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+        && request.resource.data.status in ['confirmed','cancelled']
+        && !(resource.data.status == 'cancelled' && request.resource.data.status != 'cancelled');
+      allow delete: if false;
+    }
+    match /reservationLocks/{lockId} {
+      // These contain only machine-readable occupancy data, never client contact information.
+      allow get, list: if true;
+      allow create: if loggedIn() && request.resource.data.keys().hasOnly(['bookingId','userId','masterId','date','minute'])
+        && request.resource.data.bookingId is string
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.masterId is string
+        && request.resource.data.date is string
+        && request.resource.data.minute is int
+        && lockId == request.resource.data.masterId + '|' + request.resource.data.date + '|' + string(request.resource.data.minute)
+        && bookingAfter(request.resource.data.bookingId).id == request.resource.data.bookingId
+        && bookingAfter(request.resource.data.bookingId).userId == request.auth.uid
+        && bookingAfter(request.resource.data.bookingId).status == 'pending'
+        && bookingAfter(request.resource.data.bookingId).masterId == request.resource.data.masterId
+        && bookingAfter(request.resource.data.bookingId).date == request.resource.data.date
+        && bookingAfter(request.resource.data.bookingId).lockKeys.hasAny([lockId]);
+      allow update: if false;
+      allow delete: if admin();
+    }
+    match /orders/{id} {
+      allow get, list: if admin() || own();
+      allow create: if validOrder(id);
+      allow update: if admin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+        && request.resource.data.status in ['pending','processing','completed','cancelled'];
+      allow delete: if false;
+    }
+    match /users/{id} {
+      allow read: if admin() || (loggedIn() && request.auth.uid == id);
+      allow create, update: if loggedIn() && request.auth.uid == id
+        && !('role' in request.resource.data);
+      allow delete: if false;
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}
