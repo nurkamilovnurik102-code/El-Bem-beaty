@@ -1,0 +1,138 @@
+/*
+ * EL BEM BEAUTY — Creative Motion (optional visual layer)
+ * No Firebase, booking or admin logic is changed by these styles.
+ * Remove the import from main.tsx to turn the entire layer off.
+ */
+.hero{isolation:isolate}
+.hero-grid{position:relative;z-index:1}
+
+@media (prefers-reduced-motion:no-preference){
+  /* 1. Soft drifting editorial light behind the hero. */
+  .hero::before,.hero::after{
+    content:"";position:absolute;z-index:0;pointer-events:none;
+    width:min(55vw,640px);aspect-ratio:1;border-radius:50%;
+    background:radial-gradient(circle,rgba(193,128,150,.19),rgba(215,176,175,.07) 47%,transparent 70%);
+  }
+  .hero::before{left:-22%;top:-48%;animation:ebAuraLeft 16s ease-in-out infinite alternate}
+  .hero::after{right:-24%;bottom:-49%;animation:ebAuraRight 18s ease-in-out infinite alternate}
+  @keyframes ebAuraLeft{from{transform:translate3d(0,0,0) scale(.95)}to{transform:translate3d(60px,55px,0) scale(1.15)}}
+  @keyframes ebAuraRight{from{transform:translate3d(0,0,0) scale(1)}to{transform:translate3d(-48px,-45px,0) scale(1.2)}}
+
+  /* 2. Slowly floating portrait; original photo entrance remains intact. */
+  .hero-portrait{animation:ebPortraitFloat 9s ease-in-out 1.5s infinite alternate}
+  @keyframes ebPortraitFloat{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(0,-8px,0)}}
+  .hero-portrait::after{
+    content:"";position:absolute;inset:0;z-index:2;pointer-events:none;
+    background:linear-gradient(115deg,transparent 34%,rgba(255,255,255,.14) 48%,transparent 61%);
+    background-size:220% 100%;background-position:100% 0;
+    animation:ebPortraitLight 11s ease-in-out 2s infinite;
+  }
+  @keyframes ebPortraitLight{0%,45%,100%{background-position:100% 0;opacity:0}55%{opacity:.8}76%{background-position:-100% 0;opacity:0}}
+
+  /* 3. Hand-drawn underline, gentle shimmering headline and tiny sparkle. */
+  .hero-text .eyebrow{position:relative;display:inline-block}
+  .hero-text .eyebrow::after{
+    content:"";position:absolute;left:0;bottom:-10px;width:66px;height:2px;border-radius:10px;
+    background:linear-gradient(90deg,#82435e,#dbabb9);
+    transform-origin:left;animation:ebDrawLine .9s cubic-bezier(.22,1,.36,1) both .48s;
+  }
+  @keyframes ebDrawLine{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+  @supports (-webkit-background-clip:text) or (background-clip:text){
+    .hero h1 em{
+      background:linear-gradient(105deg,#783d55 5%,#c07a91 35%,#6d334a 63%,#a86d82 85%);
+      background-size:220% 100%;-webkit-background-clip:text;background-clip:text;
+      -webkit-text-fill-color:transparent;animation:ebInkFlow 9s ease-in-out infinite alternate;
+    }
+    @keyframes ebInkFlow{from{background-position:0% 0}to{background-position:100% 0}}
+  }
+  .hero-note .note-star{display:inline-block;transform-origin:center;animation:ebTwinkle 5s ease-in-out infinite}
+  @keyframes ebTwinkle{0%,100%{transform:rotate(-10deg) scale(.9);opacity:.6}45%{transform:rotate(24deg) scale(1.22);opacity:1}}
+
+  /* 4. Underlines appear as each heading scrolls into view. */
+  .section-heading h2::after{
+    content:"";display:block;width:68px;height:3px;border-radius:3px;margin-top:14px;
+    background:linear-gradient(90deg,#82435e,#d6a9b8);
+    transform:scaleX(0);transform-origin:left;transition:transform .85s cubic-bezier(.22,1,.36,1) .25s;
+  }
+  .section-heading.elbem-visible h2::after{transform:scaleX(1)}
+
+  /* 5. A diagonal light sweep on cards; the existing card clicks stay untouched. */
+  .service-card .card-photo,.master-photo-button{position:relative;overflow:hidden}
+  .service-card .card-photo::after,.master-photo-button::after{
+    content:"";position:absolute;inset:-40% 0;pointer-events:none;
+    background:linear-gradient(110deg,transparent 28%,rgba(255,255,255,.42) 48%,transparent 65%);
+    transform:translateX(-140%) skewX(-13deg);opacity:0;
+  }
+  .service-card:hover .card-photo::after,.service-card:focus-within .card-photo::after,
+  .master-card:hover .master-photo-button::after,.master-card:focus-within .master-photo-button::after{
+    animation:ebPhotoSheen .85s ease-out forwards;
+  }
+  @keyframes ebPhotoSheen{0%{transform:translateX(-140%) skewX(-13deg);opacity:0}20%{opacity:.75}100%{transform:translateX(140%) skewX(-13deg);opacity:0}}
+  .service-card:hover,.master-card:hover{transform:translateY(-9px) rotate(-.35deg)}
+  .service-card .card-photo img,.master-photo-button img{transition:transform .7s cubic-bezier(.2,.8,.2,1),filter .7s ease}
+  .service-card:hover .card-photo img,.master-card:hover .master-photo-button img{transform:scale(1.075);filter:saturate(1.07)}
+
+  /* 6. Playful quick-navigation buttons, with no change to their destinations. */
+  .quick-grid button{position:relative;overflow:hidden;transition:transform .35s cubic-bezier(.22,1,.36,1),box-shadow .35s,border-color .35s}
+  .quick-grid button:hover,.quick-grid button:focus-visible{transform:translateY(-8px);box-shadow:0 18px 38px rgba(111,54,79,.16);border-color:#c99faf}
+  .quick-grid button svg{transition:transform .45s cubic-bezier(.22,1,.36,1)}
+  .quick-grid button:hover svg:first-child,.quick-grid button:focus-visible svg:first-child{transform:rotate(-13deg) scale(1.16)}
+  .quick-grid button:hover svg:last-child,.quick-grid button:focus-visible svg:last-child{transform:translate(4px,-4px)}
+
+  /* 7. Editorial gallery + academy photographs. */
+  .gallery-row img,.gallery-full img,.academy-highlight img,.feature-grid>img{
+    transition:transform .65s cubic-bezier(.22,1,.36,1),filter .65s ease,box-shadow .65s ease;
+  }
+  .gallery-row img:hover,.gallery-full img:hover{
+    position:relative;z-index:2;transform:translateY(-6px) scale(1.025);
+    filter:saturate(1.12);box-shadow:0 18px 35px rgba(65,32,46,.18);
+  }
+  .academy-highlight img:hover,.feature-grid>img:hover{transform:scale(1.018);filter:saturate(1.08)}
+
+  /* 8. Moving champagne glow behind the promotional offer. */
+  .offer{position:relative;isolation:isolate}
+  .offer::before{
+    content:"";position:absolute;z-index:0;pointer-events:none;left:-80px;top:-150px;
+    width:380px;height:380px;border-radius:50%;
+    background:radial-gradient(circle,rgba(255,223,224,.17),transparent 68%);
+    animation:ebOfferGlow 12s ease-in-out infinite alternate;
+  }
+  .offer-inner{z-index:1}
+  @keyframes ebOfferGlow{from{transform:translate3d(0,0,0) scale(.85)}to{transform:translate3d(180px,90px,0) scale(1.25)}}
+
+  /* 9. Sweep across main calls to action on hover/focus. */
+  .btn-primary,.book-head{position:relative;overflow:hidden;isolation:isolate}
+  .btn-primary::after,.book-head::after{
+    content:"";position:absolute;inset:-35% auto -35% -65%;width:40%;pointer-events:none;
+    background:linear-gradient(100deg,transparent,rgba(255,255,255,.3),transparent);
+    transform:skewX(-20deg) translateX(0);
+  }
+  .btn-primary:hover::after,.btn-primary:focus-visible::after,
+  .book-head:hover::after,.book-head:focus-visible::after{animation:ebButtonFlash .82s ease-out both}
+  @keyframes ebButtonFlash{from{left:-65%}to{left:140%}}
+
+  /* 10. Testimonials and contact tiles softly lift. */
+  .review-card,.contact-cards>div{
+    transition:transform .36s cubic-bezier(.22,1,.36,1),box-shadow .36s ease;
+  }
+  .review-card:hover,.contact-cards>div:hover{transform:translateY(-6px);box-shadow:0 16px 35px rgba(92,47,65,.13)}
+  .logo-symbol{display:inline-block;transition:transform .6s cubic-bezier(.22,1,.36,1)}
+  .logo:hover .logo-symbol,.logo:focus-visible .logo-symbol{transform:rotate(80deg) scale(1.12)}
+}
+
+/* Mobile: less continuous motion; same responsive layout. */
+@media (max-width:670px) and (prefers-reduced-motion:no-preference){
+  .hero::before{width:370px;left:-230px;top:-180px}
+  .hero::after{width:340px;right:-210px;bottom:-150px}
+  .hero-portrait{animation:none}
+  .hero-portrait::after{animation:none;opacity:0}
+  .service-card:hover,.master-card:hover{transform:translateY(-4px)}
+  .gallery-row img:hover,.gallery-full img:hover{transform:none;box-shadow:none}
+}
+
+/* Respect accessibility settings: all new decoration becomes static. */
+@media (prefers-reduced-motion:reduce){
+  .hero::before,.hero::after,.hero-portrait::after,.offer::before{display:none!important}
+  .section-heading h2::after{content:none}
+  .hero-text .eyebrow::after{content:none}
+}
