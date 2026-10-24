@@ -10,8 +10,9 @@
     "typecheck": "tsc --noEmit",
     "check:i18n": "node scripts/check-translations.mjs",
     "test:functions": "node --test functions/tests/functions.test.cjs",
-    "verify": "npm run typecheck && npm run check:i18n && npm run test:spark && npm run test:ui-contracts && npm run build",
+    "verify": "npm run typecheck && npm run check:i18n && npm run test:spark && npm run test:ui-contracts && npm run test:release && npm run build",
     "test:ui-contracts": "node --test scripts/test-final-ui-contracts.cjs",
+    "test:release": "node --test scripts/test-release-polish.cjs",
     "test:spark": "node --test scripts/test-spark-logic.cjs"
   },
   "dependencies": {

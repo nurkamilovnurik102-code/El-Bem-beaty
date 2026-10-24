@@ -96,3 +96,32 @@
 .music-volume-control small { font-size: 11px; color: #7d6a73; line-height: 1.6; }
 .music-volume-control span { display: flex; justify-content: space-between; gap: 10px; }
 @media (prefers-reduced-motion:reduce) { .product-add-btn.is-added, .cart-added { animation: none; } }
+
+/* EL BEM 2026 refinement — discreet navigation and premium motion. */
+.mobile-menu-trigger{display:none}
+@media(max-width:980px){.mobile-menu-trigger{display:inline-flex;align-items:center;justify-content:center}}
+@media(min-width:981px){.menu-overlay{display:none!important}}
+
+/* Entrance sequence: visual polish without changing business logic. */
+@keyframes elbemRise{from{opacity:0;transform:translate3d(0,22px,0)}to{opacity:1;transform:translate3d(0,0,0)}}
+@keyframes elbemPhoto{from{opacity:.6;transform:scale(1.055)}to{opacity:1;transform:scale(1)}}
+@keyframes elbemGlow{0%,100%{opacity:.48;transform:translateY(0)}50%{opacity:.78;transform:translateY(-7px)}}
+.hero-text .eyebrow{animation:elbemRise .75s both .05s}
+.hero-text h1{animation:elbemRise .85s cubic-bezier(.22,1,.36,1) both .16s}
+.hero-text>p{animation:elbemRise .78s both .32s}
+.hero-actions{animation:elbemRise .8s both .44s}
+.hero-portrait img{animation:elbemPhoto 1.25s cubic-bezier(.22,1,.36,1) both}
+.hero-seal{animation:elbemGlow 6s ease-in-out infinite}
+.elbem-reveal{opacity:0;transform:translate3d(0,28px,0);transition:opacity .7s ease,transform .7s cubic-bezier(.22,1,.36,1);transition-delay:var(--elbem-delay,0ms)}
+.elbem-reveal.elbem-visible{opacity:1;transform:translate3d(0,0,0)}
+.service-card,.master-card,.product-card{transition:transform .36s cubic-bezier(.22,1,.36,1),box-shadow .36s,border-color .36s}
+.service-card:hover,.master-card:hover,.product-card:hover{transform:translateY(-6px);box-shadow:0 20px 44px rgba(83,39,58,.12);border-color:rgba(125,67,91,.32)}
+.btn,.book-head{transition:transform .3s cubic-bezier(.22,1,.36,1),box-shadow .3s,background-color .3s}
+.btn:hover,.book-head:hover{transform:translateY(-2px);box-shadow:0 10px 25px rgba(111,54,79,.19)}
+.desktop-nav button,.footer button{transition:color .23s,transform .23s}
+.desktop-nav button:hover,.footer button:hover{transform:translateY(-2px)}
+@media(prefers-reduced-motion:reduce){
+ .hero-text .eyebrow,.hero-text h1,.hero-text>p,.hero-actions,.hero-portrait img,.hero-seal{animation:none!important}
+ .elbem-reveal{opacity:1!important;transform:none!important;transition:none!important}
+ .service-card,.master-card,.product-card,.btn,.book-head,.desktop-nav button,.footer button{transition:none!important;transform:none!important}
+}
