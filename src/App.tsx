@@ -153,7 +153,19 @@ export default function App(){
     if(!adminPass){setAuthError(t('Введите пароль.'));return;}
     setAdminBusy(true);
     try{
-      await signInWithEmailAndPassword(auth,ownerEmail,adminPass);
+     
+const sharedAdminEmail = import.meta.env.VITE_ADMIN_LOGIN_EMAIL?.trim();
+
+if (!sharedAdminEmail) {
+  throw new Error('Администратор не настроен.');
+}
+
+await signInWithEmailAndPassword(
+  auth,
+  sharedAdminEmail,
+  adminPass
+);
+
       if(!await checkAdmin()){
         await signOut(auth);
         throw new Error('Для этой учётной записи не назначена роль администратора.');
